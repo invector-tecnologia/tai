@@ -20,6 +20,10 @@ type
     model*: string
     authToken*: string
 
+  AudioConfig* = object
+    url*: string
+    autoplay*: bool
+
   Config* = object
     fileTreeSide*: FileTreeSide
     outlinesVisible*: bool
@@ -29,6 +33,7 @@ type
     bottomPanelHeight*: int
     workspace*: string
     ai*: AiConfig
+    audio*: AudioConfig
 
 proc defaultConfig*(): Config =
   Config(
@@ -45,6 +50,10 @@ proc defaultConfig*(): Config =
       baseUrl: getEnv("TAI_BASE_URL", "https://api.openai.com/v1"),
       model: getEnv("TAI_MODEL", "gpt-4o-mini"),
       authToken: "",
+    ),
+    audio: AudioConfig(
+      url: getEnv("TAI_AUDIO_URL", ""),
+      autoplay: false,
     ),
   )
 
@@ -93,6 +102,12 @@ proc loadConfig*(path = configPath()): Config =
       result.ai.model = ai["model"].getStr
     if ai.hasKey("auth_token"):
       result.ai.authToken = ai["auth_token"].getStr
+  if t.hasKey("audio"):
+    let audio = t["audio"]
+    if audio.hasKey("url"):
+      result.audio.url = audio["url"].getStr
+    if audio.hasKey("autoplay"):
+      result.audio.autoplay = audio["autoplay"].getBool
 
 proc saveConfig*(cfg: Config, path = configPath()) =
   createDir(parentDir(path))
@@ -105,7 +120,6 @@ proc saveConfig*(cfg: Config, path = configPath()) =
     of apkOpenAiCompat: "openai"
     of apkAnthropic: "anthropic"
     of apkOllama: "ollama"
-  # Prefer env for secrets when rewriting; keep empty api_key in file if set via env only.
   let body = """
 file_tree_side = "$#"
 outlines_visible = $#
@@ -121,9 +135,14 @@ api_key = "$#"
 base_url = "$#"
 model = "$#"
 auth_token = "$#"
+
+[audio]
+url = "$#"
+autoplay = $#
 """ % [
     side, $cfg.outlinesVisible, $cfg.filesVisible, $cfg.previewMode,
     $cfg.sidePanelWidth, $cfg.bottomPanelHeight, cfg.workspace,
     provider, cfg.ai.apiKey, cfg.ai.baseUrl, cfg.ai.model, cfg.ai.authToken,
+    cfg.audio.url, $cfg.audio.autoplay,
   ]
   writeFile(path, body)

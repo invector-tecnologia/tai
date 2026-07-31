@@ -3,6 +3,7 @@
 import std/[os, strutils, sets, options]
 import tatui
 import tatui/core/[color, style]
+import ../theme
 
 type
   TokenKind* = enum
@@ -75,25 +76,25 @@ proc detectLang*(path: string): LangId =
 proc tokenStyle*(kind: TokenKind): Style =
   case kind
   of tkPlain:
-    defaultStyle()
+    tnFg(Tn.fg)
   of tkKeyword:
-    style(fg = some(Magenta), mods = {mBold})
+    tnFg(Tn.magenta, {mBold})
   of tkString:
-    style(fg = some(Green))
+    tnFg(Tn.green)
   of tkComment:
-    style(fg = some(DarkGray), mods = {mItalic})
+    tnFg(Tn.comment, {mItalic})
   of tkNumber:
-    style(fg = some(Cyan))
+    tnFg(Tn.cyan)
   of tkPunct:
-    style(fg = some(Gray))
+    tnFg(Tn.comment)
   of tkHeader:
-    style(fg = some(Blue), mods = {mBold})
+    tnFg(Tn.blue, {mBold})
   of tkKey:
-    style(fg = some(Yellow))
+    tnFg(Tn.yellow)
   of tkType:
-    style(fg = some(LightBlue))
+    tnFg(Tn.cyan)
   of tkFunction:
-    style(fg = some(LightYellow))
+    tnFg(Tn.orange)
 
 proc addSpan(spans: var seq[TokenSpan], start, finish: int, kind: TokenKind) =
   if finish > start:

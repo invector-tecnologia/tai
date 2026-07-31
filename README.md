@@ -5,14 +5,16 @@
 Tai is a TUI text editor with an embedded AI coding harness — files, buffer, outline, and agent in one screen. Built in [Nim](https://nim-lang.org) on [TATUÍ](https://github.com/invector-tecnologia/tatui).
 
 ```
-┌────────────────────────── tabs ──────────────────────────┐
-│ Files │           editor / preview            │ Outline │
-├───────┴───────────────────────────────────────┴─────────┤
-│ AI agent  ·  :commands  ·  ask | agent                  │
-└─────────────────────────────────────────────────────────┘
+┌─ TAI EDITOR (ASCII) ── v0.1.0 ── [▶][⏭] podcast ────────┐
+│ developed by Bernardo Rosmaninho - www.invector.com.br │
+├─ tabs ─────────────────────────────────────────────────┤
+│ Files │           editor / preview           │ Outline │
+├───────┴──────────────────────────────────────┴─────────┤
+│ AI agent  ·  :commands  ·  ask | agent                 │
+└────────────────────────────────────────────────────────┘
 ```
 
-Not another chat-only CLI. You keep editing; the agent lives in the bottom panel and can read (and, when allowed, write) your workspace.
+Not another chat-only CLI. You keep editing; the agent lives in the bottom panel and can read (and, when allowed, write) your workspace. Chrome uses a **Tokyo Night** palette.
 
 ---
 
@@ -25,12 +27,14 @@ Not another chat-only CLI. You keep editing; the agent lives in the bottom panel
 | **Honest agent** | Read-only tools by default; `:agent on` unlocks write/shell |
 | **Your models** | OpenAI-compatible, Anthropic, or local Ollama |
 | **Project memory** | Loads `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` automatically |
+| **Tokyo Night** | Branding header + syntax colors inspired by Tokyo Night |
+| **Podcast audio** | Play a YouTube video/playlist in the header (`:audio`) |
 
 ---
 
 ## Quick start
 
-**Requirements:** Nim ≥ 2.0 · Linux or macOS · optional `xclip`/`wl-clipboard`, `rg`, [rtk](https://github.com/rtk-ai/rtk), [Ollama](https://ollama.com)
+**Requirements:** Nim ≥ 2.0 · Linux or macOS · optional `xclip`/`wl-clipboard`, `rg`, [rtk](https://github.com/rtk-ai/rtk), [Ollama](https://ollama.com), **mpv** + **yt-dlp** (header podcast player)
 
 ```sh
 git clone https://github.com/invector-tecnologia/tai.git
@@ -63,7 +67,8 @@ Or inside Tai: `:login <token>` then `:provider openai|anthropic|ollama` and `:m
 
 | Panel | What it does |
 |-------|----------------|
-| **Tabs** (top) | Open buffers; click or `Ctrl-N` / `Ctrl-P` to cycle |
+| **Header** | ASCII **TAI EDITOR**, credit, version, audio controls |
+| **Tabs** | Open buffers; click or `Ctrl-N` / `Ctrl-P` to cycle |
 | **Files** | Tree; click or focus + arrows + Enter |
 | **Editor** | Edit with mouse and keyboard; right-click menu |
 | **Outlines** | Jump to symbols / headings |
@@ -135,6 +140,31 @@ Shell also works via `:shell <command>` when agent mode is on (uses [RTK](https:
 | `:shell <cmd>` | Run shell (needs `:agent on`) |
 | `:clear` | Clear chat + session transcript |
 
+---
+
+## Audio (podcast from YouTube)
+
+Play a YouTube video or playlist in the header like background podcast audio.
+
+**Deps:** `mpv` and `yt-dlp` on `PATH`.
+
+| Command | |
+|---------|--|
+| `:audio url <link>` | Set playlist/video URL (saved to config) |
+| `:audio play` | Start / resume |
+| `:audio pause` | Pause |
+| `:audio next` | Next item in playlist |
+| `:audio stop` | Stop |
+| `:audio toggle` | Play ↔ pause |
+
+Click `[▶]` / `[❚❚]` or `[⏭]` in the header. Env: `TAI_AUDIO_URL`.
+
+```toml
+[audio]
+url = "https://www.youtube.com/playlist?list=..."
+autoplay = false
+```
+
 ### Project memory
 
 On startup (and after `:cd`), Tai loads into the system prompt, if present:
@@ -174,6 +204,10 @@ api_key = ""
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 auth_token = ""
+
+[audio]
+url = ""
+autoplay = false
 ```
 
 Prefer env vars for secrets: `TAI_API_KEY`, `TAI_BASE_URL`, `TAI_MODEL`.  

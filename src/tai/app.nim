@@ -14,6 +14,10 @@ import ./highlight/engine
 import ./outline/extract
 import ./preview/render
 import ./ai/[provider, rag, rtk]
+import ./theme
+import ./ui/brand
+import ./audio/player
+import ./version
 
 type
   FocusPanel* = enum
@@ -24,7 +28,7 @@ type
     fpAi
 
   PanelRects* = object
-    top*, left*, center*, right*, bottom*: Rect
+    header*, tabs*, left*, center*, right*, bottom*: Rect
 
   App* = object
     cfg*: Config
@@ -46,6 +50,7 @@ type
     mouseSelecting*: bool
     watcher*: FileWatcher
     ai*: AiSession
+    audio*: AudioPlayer
     lastFrameMs*: float
     panelRects*: PanelRects
 
@@ -96,19 +101,30 @@ proc initApp*(cfg: Config): App =
   result.menu = initContextMenu()
   result.watcher = initFileWatcher()
   result.ai = initAiSession(cfg.ai, getConfigDir() / "tai" / "cache", result.cwd)
+  result.audio = initAudioPlayer(cfg.audio.url)
   result.focus = fpEditor
   result.refreshFileTree()
   result.refreshOutlines()
-  result.setStatus("Tai ready — :help")
+  result.setStatus("Tai v" & TaiVersion & " — :help")
+  if cfg.audio.autoplay and cfg.audio.url.len > 0:
+    result.audio.play()
+
+proc headerHeight(width: int): int =
+  ## Banner rows + credit line.
+  let lines = bannerLines(width)
+  lines.len + 1
 
 proc computeLayout*(app: var App, area: Rect): PanelRects =
-  let topH = 1
+  let hdrH = headerHeight(area.width.int)
+  let topH = hdrH + 1 # header + tabs
   let bottomH = max(3, app.cfg.bottomPanelHeight)
   let sideW = max(12, app.cfg.sidePanelWidth)
   let showFiles = app.cfg.filesVisible
   let showOutlines = app.cfg.outlinesVisible
   let rows = area.split(Vertical, @[length(topH), fill(1), length(bottomH)])
-  result.top = rows[0]
+  let topSplit = rows[0].split(Vertical, @[length(hdrH), length(1)])
+  result.header = topSplit[0]
+  result.tabs = topSplit[1]
   result.bottom = rows[2]
   let mid = rows[1]
 
@@ -175,9 +191,9 @@ proc drawContextMenu(app: var App, f: var Frame) =
   for i, item in app.menu.items:
     let st =
       if i == app.menu.selected:
-        style(fg = some(Black), bg = some(Cyan), mods = {mBold})
+        tnHl(Tn.black, Tn.cyan, {mBold})
       else:
-        defaultStyle()
+        tnFg(Tn.fg)
     discard f.buf[].setStringN(inner.left, inner.top + i, " " & item.label, st, inner.width.int)
 
 proc drawEditor(app: var App, f: var Frame, area: Rect) =
@@ -236,7 +252,7 @@ proc drawEditor(app: var App, f: var Frame, area: Rect) =
     if doc.selection.active and not doc.previewMode:
       let (a, b) = doc.normalizedSelection()
       if lineIdx >= a.row and lineIdx <= b.row:
-        discard f.buf[].setStringN(inner.left, y, "▌", style(fg = some(Cyan)), 1)
+        discard f.buf[].setStringN(inner.left, y, "▌", tnFg(Tn.cyan), 1)
 
   # cursor
   if app.focus == fpEditor and not doc.previewMode and not app.commandMode:
@@ -255,24 +271,69 @@ proc drawSideList(
   let lst = list(
     items,
     blk = blk,
-    highlightStyle = style(fg = some(Black), bg = some(Blue)),
+    highlightStyle = tnHl(Tn.black, Tn.blue),
     highlightSymbol = "› ",
   )
   f.renderStateful(lst, area, state)
+
+proc drawHeader(app: var App, f: var Frame, area: Rect) =
+  if area.isEmpty: return
+  # Fill background
+  for row in 0 ..< area.height.int:
+    discard f.buf[].setStringN(
+      area.left, area.top + row, repeat(' ', area.width.int),
+      tnHl(Tn.fg, Tn.bg), area.width.int
+    )
+  let lines = bannerLines(area.width.int)
+  let brandStyle = tnFg(Tn.blue, {mBold})
+  for i, line in lines:
+    if i >= area.height.int - 1: break
+    let clipped =
+      if line.len > area.width.int: line[0 ..< area.width.int]
+      else: line
+    discard f.buf[].setStringN(
+      area.left, area.top + i, clipped, brandStyle, area.width.int
+    )
+  # Credit + version on last banner-adjacent line
+  let creditRow = min(lines.len, area.height.int - 1)
+  let credit = creditWithVersion(max(10, area.width.int - 28))
+  discard f.buf[].setStringN(
+    area.left, area.top + creditRow, credit, tnFg(Tn.comment), area.width.int
+  )
+  # Player controls on the right of the credit row
+  let playLbl = if app.audio.state == asPlaying: "[❚❚]" else: "[▶]"
+  let nextLbl = "[⏭]"
+  let status = app.audio.statusLabel()
+  var right = playLbl & " " & nextLbl & " " & status
+  if right.len > area.width.int div 2:
+    right = playLbl & " " & nextLbl
+  let rx = area.right - right.len
+  if rx > area.left:
+    let playStyle =
+      if app.audio.state == asPlaying: tnFg(Tn.green, {mBold})
+      else: tnFg(Tn.cyan, {mBold})
+    discard f.buf[].setStringN(rx, area.top + creditRow, right, playStyle, right.len)
+    app.audio.playBtn = (rx, area.top + creditRow, playLbl.len)
+    app.audio.nextBtn = (rx + playLbl.len + 1, area.top + creditRow, nextLbl.len)
+  else:
+    app.audio.playBtn = (0, 0, 0)
+    app.audio.nextBtn = (0, 0, 0)
 
 proc draw*(app: var App, f: var Frame) =
   let t0 = cpuTime()
   let layout = app.computeLayout(f.area)
 
-  # Top: tabs
+  app.drawHeader(f, layout.header)
+
+  # Tabs
   let titles = app.tabs.titles()
   let tabBar = tabs(
     titles,
     selected = app.tabs.active,
-    highlightStyle = style(fg = some(Black), bg = some(Cyan), mods = {mBold}),
+    highlightStyle = tnHl(Tn.black, Tn.blue, {mBold}),
     divider = " │ ",
   )
-  f.renderWidget(tabBar, layout.top)
+  f.renderWidget(tabBar, layout.tabs)
 
   # File tree
   let treeArea = app.fileTreeArea()
@@ -317,7 +378,7 @@ proc draw*(app: var App, f: var Frame) =
         if line.len > bInner.width.int: line[0 ..< bInner.width.int]
         else: line
       discard f.buf[].setStringN(
-        bInner.left, bInner.top + i, clipped, defaultStyle(), bInner.width.int
+        bInner.left, bInner.top + i, clipped, tnFg(Tn.fg), bInner.width.int
       )
     let prompt =
       if app.commandMode: ":" & app.commandLine & "█"
@@ -325,12 +386,12 @@ proc draw*(app: var App, f: var Frame) =
       else:
         let st =
           if epochTime() < app.statusUntil: app.statusMsg
-          else: "Ctrl-Q quit │ :help │ Tab focus │ PgUp/Dn AI scroll"
+          else: "Ctrl-Q quit │ :help │ Tab focus │ :audio"
         st
     if bInner.height.int > 0:
       let py = bInner.top + bInner.height.int - 1
       discard f.buf[].setStringN(
-        bInner.left, py, prompt, style(fg = some(Yellow)), bInner.width.int
+        bInner.left, py, prompt, tnFg(Tn.cyan), bInner.width.int
       )
 
   app.drawContextMenu(f)
@@ -405,6 +466,37 @@ proc handleAiCommand(app: var App, cmd: string) =
       app.setStatus("AI focus — type message, Enter to send")
     else:
       app.ai.startAskAsync(prompt, app.bufferContext())
+  of "audio":
+    if parts.len < 2:
+      app.setStatus("usage: :audio play|pause|next|stop|url <link>")
+      return
+    case parts[1].toLowerAscii
+    of "play":
+      app.audio.play()
+      app.setStatus(app.audio.statusLabel())
+    of "pause":
+      app.audio.pause()
+      app.setStatus(app.audio.statusLabel())
+    of "next":
+      app.audio.nextTrack()
+      app.setStatus(app.audio.statusLabel())
+    of "stop":
+      app.audio.stop()
+      app.setStatus("audio stopped")
+    of "url":
+      if parts.len < 3:
+        app.setStatus("usage: :audio url <youtube-link>")
+        return
+      let link = parts[2 .. ^1].join(" ")
+      app.audio.setUrl(link)
+      app.cfg.audio.url = link
+      saveConfig(app.cfg)
+      app.setStatus("audio url set")
+    of "toggle":
+      app.audio.toggle()
+      app.setStatus(app.audio.statusLabel())
+    else:
+      app.setStatus("usage: :audio play|pause|next|stop|url <link>")
   else:
     discard
 
@@ -581,10 +673,23 @@ proc handleMouse(app: var App, m: MouseEvent) =
     app.menu.openAt(m.col, m.row)
     return
 
+  # Header audio buttons
+  if app.panelRects.header.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
+    let pb = app.audio.playBtn
+    let nb = app.audio.nextBtn
+    if pb.w > 0 and m.col >= pb.x and m.col < pb.x + pb.w and m.row == pb.y:
+      app.audio.toggle()
+      app.setStatus(app.audio.statusLabel())
+      return
+    if nb.w > 0 and m.col >= nb.x and m.col < nb.x + nb.w and m.row == nb.y:
+      app.audio.nextTrack()
+      app.setStatus(app.audio.statusLabel())
+      return
+
   # Tab bar clicks
-  if app.panelRects.top.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
+  if app.panelRects.tabs.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
     let titles = app.tabs.titles()
-    var x = app.panelRects.top.left
+    var x = app.panelRects.tabs.left
     for i, t in titles:
       let w = t.len + 3
       if m.col >= x and m.col < x + w:
@@ -820,11 +925,13 @@ proc runApp*(app: var App) =
   term.setup()
   enableMouse()
   defer:
+    state[].audio.stop()
     disableMouse()
     term.restore()
     app = state[]
   while not state.quit:
     discard state[].ai.pollAiEvents()
+    state[].audio.pollAlive()
     for path in state.watcher.poll():
       if state.tabs.current.path == path and not state.tabs.current.dirty:
         let loaded = loadFile(path)

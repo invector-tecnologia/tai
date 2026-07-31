@@ -113,10 +113,10 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
   of "help":
     return okResult(
       ":q :w :wq :e :hide/:show [outlines|files] :preview :source " &
-      ":set file_tree left|right :cd :ai :login :provider :model :rag :shell"
+      ":set file_tree left|right :cd :ai :login :provider :model :rag :shell :audio"
     )
   else:
-    if head in ["ai", "login", "provider", "model", "rag", "shell", "clear"]:
+    if head in ["ai", "login", "provider", "model", "rag", "shell", "clear", "audio"]:
       var r = okResult("")
       r.aiCmd = cmd
       return r
