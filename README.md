@@ -1,53 +1,210 @@
 # Tai
 
-**Tai** is a TUI text editor written in [Nim](https://nim-lang.org), using [TATUÍ](https://github.com/invector-tecnologia/tatui) for the terminal UI.
+**Editor no terminal. Agente no mesmo lugar.**
+
+Tai is a TUI text editor with an embedded AI coding harness — files, buffer, outline, and agent in one screen. Built in [Nim](https://nim-lang.org) on [TATUÍ](https://github.com/invector-tecnologia/tatui).
 
 ```
-┌─────────────────────────── tabs ───────────────────────────┐
-│ Files │              editor / preview             │ Outline│
-├───────┴───────────────────────────────────────────┴────────┤
-│ AI agent + :commands                                       │
-└────────────────────────────────────────────────────────────┘
+┌────────────────────────── tabs ──────────────────────────┐
+│ Files │           editor / preview            │ Outline │
+├───────┴───────────────────────────────────────┴─────────┤
+│ AI agent  ·  :commands  ·  ask | agent                  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## Features
+Not another chat-only CLI. You keep editing; the agent lives in the bottom panel and can read (and, when allowed, write) your workspace.
 
-- Five-panel layout (top, left, center, right, bottom)
-- Mouse editing: click, select, scroll, right-click context menu
-- Multi-file tabs (`Ctrl-N` / `Ctrl-P` to cycle)
-- File tree + outlines (swap sides with `:set file_tree left|right`; toggle with `:hide`/`:show outlines|files` — `arquivos` alias kept)
-- Keyboard navigation in file tree and outlines when focused (`Tab` cycles focus)
-- Syntax highlighting (Markdown, YAML, TOML, XML, JSON, Shell, Nim, …)
-- Source / preview toggle for Markdown & HTML (`:preview` / `:source`)
-- Helix-style `:` commands
-- AI panel: OpenAI-compatible / Anthropic / Ollama, background requests, tool loop (`read_file`, `grep`, `list_dir`; `write_file`/`shell` with `:agent on`), project memory (`AGENTS.md` / `CLAUDE.md`), response cache, workspace RAG, optional [RTK](https://github.com/rtk-ai/rtk)
+---
 
-## Requirements
+## Why Tai
 
-- Nim ≥ 2.0
-- Linux or macOS
-- Optional: `xclip` or `wl-clipboard`, `rg`, [`rtk`](https://github.com/rtk-ai/rtk), Ollama for local models
+| | |
+|---|---|
+| **Editor-first** | Mouse, tabs, syntax highlight, MD/HTML preview — then AI |
+| **Helix-style `:`** | Familiar colon commands without leaving the TUI |
+| **Honest agent** | Read-only tools by default; `:agent on` unlocks write/shell |
+| **Your models** | OpenAI-compatible, Anthropic, or local Ollama |
+| **Project memory** | Loads `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` automatically |
 
-## Build
+---
+
+## Quick start
+
+**Requirements:** Nim ≥ 2.0 · Linux or macOS · optional `xclip`/`wl-clipboard`, `rg`, [rtk](https://github.com/rtk-ai/rtk), [Ollama](https://ollama.com)
 
 ```sh
+git clone https://github.com/invector-tecnologia/tai.git
+cd tai
 nimble install -d
 nimble build
-./tai [path]
+./tai .
 ```
 
-## Tests
+Open a file or directory:
 
 ```sh
-nimble test
+./tai src/tai/app.nim
+./tai ~/projects/my-app
 ```
 
-## Config
+Set credentials (pick one):
 
-`~/.config/tai/config.toml` — see [docs/architecture.md](docs/architecture.md).
+```sh
+export TAI_API_KEY="sk-..."
+export TAI_BASE_URL="https://api.openai.com/v1"   # optional
+export TAI_MODEL="gpt-4o-mini"                    # optional
+```
 
-Auth: set `TAI_API_KEY` / `ai.api_key`, or `:login <token>` (token paste; OAuth loopback not implemented yet).
+Or inside Tai: `:login <token>` then `:provider openai|anthropic|ollama` and `:model <id>`.
 
-## License
+---
 
-AGPL-3.0 (inherits TATUÍ packaging license until upstream clarifies MIT vs AGPL).
+## Layout
+
+| Panel | What it does |
+|-------|----------------|
+| **Tabs** (top) | Open buffers; click or `Ctrl-N` / `Ctrl-P` to cycle |
+| **Files** | Tree; click or focus + arrows + Enter |
+| **Editor** | Edit with mouse and keyboard; right-click menu |
+| **Outlines** | Jump to symbols / headings |
+| **AI** (bottom) | Transcript + `ai>` prompt or `:` command line |
+
+`Tab` cycles focus: Editor → Files → Outlines → AI → Editor.
+
+Hide sides: `:hide files` · `:hide outlines` (alias `:hide arquivos`).  
+Swap file tree: `:set file_tree left|right`.
+
+---
+
+## Editor cheat sheet
+
+| Keys | Action |
+|------|--------|
+| `:` | Command mode |
+| `Ctrl-S` | Save |
+| `Ctrl-Z` / `Ctrl-Y` | Undo / redo |
+| `Ctrl-C` `X` `V` `A` | Copy / cut / paste / select all |
+| `Ctrl-W` | Close tab |
+| `Ctrl-N` / `Ctrl-P` | Next / previous tab |
+| `Ctrl-Q` | Quit |
+| Mouse | Click, drag-select, scroll, right-click menu |
+
+### Colon commands
+
+| Command | |
+|---------|--|
+| `:w` `:q` `:wq` `:q!` | Write / quit |
+| `:e <path>` | Open file |
+| `:cd <path>` | Change workspace + refresh tree |
+| `:preview` / `:source` | Markdown & HTML preview vs source |
+| `:hide` / `:show` `outlines\|files` | Toggle side panels |
+| `:set file_tree left\|right` | File tree side |
+| `:help` | Short command list |
+
+---
+
+## AI user guide
+
+### Chat
+
+1. `Tab` until the AI panel is focused (or `:ai`).
+2. Type a message at `ai>` and press Enter.
+3. Selection in the editor is preferred as context; otherwise the open buffer (truncated) is sent.
+4. While the agent runs, the title shows `…`. **Esc** requests cancel between tool rounds.
+5. `PgUp` / `PgDn` scroll the transcript.
+
+### Modes
+
+| Mode | How | Tools |
+|------|-----|--------|
+| **Ask** (default) | `:agent off` | `read_file`, `list_dir`, `grep` |
+| **Agent** | `:agent on` | + `write_file`, `shell` |
+
+Shell also works via `:shell <command>` when agent mode is on (uses [RTK](https://github.com/rtk-ai/rtk) when installed to shrink noisy output).
+
+### AI commands
+
+| Command | |
+|---------|--|
+| `:ai` / `:ai <prompt>` | Focus AI or send one-shot prompt |
+| `:login <token>` | Save API token (paste; no OAuth yet) |
+| `:provider openai\|anthropic\|ollama` | Switch backend |
+| `:model <id>` | Switch model mid-session |
+| `:agent on\|off` | Allow or block writes/shell |
+| `:rag reindex` | Rebuild workspace keyword index |
+| `:shell <cmd>` | Run shell (needs `:agent on`) |
+| `:clear` | Clear chat + session transcript |
+
+### Project memory
+
+On startup (and after `:cd`), Tai loads into the system prompt, if present:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `GEMINI.md`
+
+Put repo conventions there once; every chat picks them up.
+
+### Providers
+
+| Provider | Notes |
+|----------|--------|
+| **openai** (default) | Any OpenAI-compatible `/v1/chat/completions` endpoint |
+| **anthropic** | Messages API |
+| **ollama** | Local `http://127.0.0.1:11434/v1` — no cloud key required |
+
+---
+
+## Configuration
+
+File: `~/.config/tai/config.toml`
+
+```toml
+file_tree_side = "left"
+outlines_visible = true
+files_visible = true
+preview_mode = false
+side_panel_width = 28
+bottom_panel_height = 8
+workspace = "/home/you/projects/app"
+
+[ai]
+provider = "openai"
+api_key = ""
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+auth_token = ""
+```
+
+Prefer env vars for secrets: `TAI_API_KEY`, `TAI_BASE_URL`, `TAI_MODEL`.  
+`:login` / `:provider` / `:model` rewrite the TOML (keys may be stored in plaintext).
+
+Session transcript and response cache live under `~/.config/tai/cache/`.
+
+More detail: [docs/architecture.md](docs/architecture.md) · [ADRs](docs/adr/).
+
+---
+
+## Develop
+
+```sh
+nimble test    # suite
+nimble lint    # nim check
+nimble run     # build + run in cwd
+```
+
+License: **AGPL-3.0** (aligned with TATUÍ packaging until upstream clarifies MIT vs AGPL).
+
+---
+
+## Roadmap
+
+MCP · plan mode · skills/hooks · git commands · tree-sitter · OAuth device-code · theming · Vim modal map · token streaming
+
+---
+
+<p align="center">
+  <b>Tai</b> — edit here. Ask here. Ship from the terminal.
+  <br/>
+  <a href="https://github.com/invector-tecnologia/tai">github.com/invector-tecnologia/tai</a>
+</p>
