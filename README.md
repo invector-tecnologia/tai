@@ -27,8 +27,11 @@ Not another chat-only CLI. You keep editing; the agent lives in the bottom panel
 | **Honest agent** | Read-only tools by default; `:agent on` unlocks write/shell |
 | **Your models** | OpenAI-compatible, Anthropic, or local Ollama |
 | **Project memory** | Loads `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` automatically |
-| **Tokyo Night** | Branding header + syntax colors inspired by Tokyo Night |
+| **Tokyo Night** | Branding header + multi-theme (`:set theme`) |
 | **Podcast audio** | Play a YouTube video/playlist in the header (`:audio`) |
+| **Modes** | `:ask` / `:plan` / `:agent` with streaming replies |
+| **Git** | `:git status\|diff\|log\|add\|commit\|branch` |
+| **MCP / skills** | Stdio MCP servers + `SKILL.md` + hooks |
 
 ---
 
@@ -233,7 +236,9 @@ License: **AGPL-3.0** (aligned with TATUÍ packaging until upstream clarifies MI
 
 ## Roadmap
 
-MCP · plan mode · skills/hooks · git commands · tree-sitter · OAuth device-code · theming · Vim modal map · token streaming
+Shipped in **v0.4.0**: streaming · plan/ask/agent · `:git` · MCP stdio · skills/hooks · multi-theme · OAuth device-code · Vim modal · tree-sitter auto-fallback
+
+Later: MCP HTTP/SSE · native tree-sitter spans · GitHub PR · fuller Vim
 
 ---
 

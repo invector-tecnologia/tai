@@ -1,14 +1,10 @@
-## Built-in agent tools: read, search, write, shell (optional RTK).
+## Built-in agent tools + mode gating.
 
 import std/[os, strutils, osproc, json]
+import ../config
 import ./rtk
 
 type
-  ToolPermission* = enum
-    tpReadOnly   ## read_file, grep, list_dir only
-    tpAsk        ## writes/shell need allowDangerous
-    tpAllowAll   ## all tools
-
   ToolResult* = object
     ok*: bool
     output*: string
@@ -75,7 +71,7 @@ proc toolWriteFile*(root, path, content: string, allowed: bool): ToolResult =
       needsApproval: true,
       pendingName: "write_file",
       pendingArgs: path,
-      output: "write_file blocked — enable with :agent on",
+      output: "write_file blocked — switch to :agent mode",
     )
   let p =
     if path.isAbsolute: path
@@ -95,7 +91,7 @@ proc toolShell*(cmd: string, allowed: bool): ToolResult =
       needsApproval: true,
       pendingName: "shell",
       pendingArgs: cmd,
-      output: "shell blocked — enable with :agent on",
+      output: "shell blocked — switch to :agent mode",
     )
   if cmd.len == 0:
     return ToolResult(ok: false, output: "empty command")
@@ -103,27 +99,53 @@ proc toolShell*(cmd: string, allowed: bool): ToolResult =
   let note = if r.usedRtk: " (rtk)" else: ""
   ToolResult(ok: true, output: truncateOut(r.output) & note)
 
-proc openaiToolDefs*(): JsonNode =
-  parseJson("""
+proc toolAllowed*(mode: AiMode, name: string): bool =
+  case mode
+  of amAsk:
+    false
+  of amPlan:
+    name in ["read_file", "list_dir", "grep"]
+  of amAgent:
+    true
+
+proc openaiToolDefs*(mode: AiMode): JsonNode =
+  let all = parseJson("""
 [
   {"type":"function","function":{"name":"read_file","description":"Read a text file from the workspace","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
   {"type":"function","function":{"name":"list_dir","description":"List files in a directory","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":[]}}},
   {"type":"function","function":{"name":"grep","description":"Search workspace for a pattern","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"glob":{"type":"string"}},"required":["pattern"]}}},
   {"type":"function","function":{"name":"write_file","description":"Write content to a file","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
-  {"type":"function","function":{"name":"shell","description":"Run a shell command in the workspace","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}}
+  {"type":"function","function":{"name":"shell","description":"Run a shell command in the workspace","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+  {"type":"function","function":{"name":"git_status","description":"Show git status","parameters":{"type":"object","properties":{},"required":[]}}},
+  {"type":"function","function":{"name":"invoke_skill","description":"Load a skill by name into context","parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}
 ]
 """)
+  if mode == amAsk:
+    return newJArray()
+  result = newJArray()
+  for t in all:
+    let n = t["function"]{"name"}.getStr
+    if toolAllowed(mode, n) or (mode == amAgent and n in ["git_status", "invoke_skill"]):
+      if mode == amPlan and n notin ["read_file", "list_dir", "grep"]:
+        continue
+      result.add t
 
 proc dispatchTool*(
     root, name, argsJson: string,
-    allowDangerous: bool,
+    mode: AiMode,
+    skillBody = "",
 ): ToolResult =
+  if not toolAllowed(mode, name) and name notin ["git_status", "invoke_skill"]:
+    return ToolResult(ok: false, output: "tool '" & name & "' not allowed in " & modeName(mode) & " mode")
+  if mode == amPlan and name in ["write_file", "shell"]:
+    return ToolResult(ok: false, output: "plan mode is read-only")
   var args = newJObject()
   try:
     if argsJson.len > 0:
       args = parseJson(argsJson)
   except CatchableError:
     return ToolResult(ok: false, output: "invalid tool args JSON")
+  let allowDangerous = mode == amAgent
   case name
   of "read_file":
     toolReadFile(root, args{"path"}.getStr)
@@ -135,5 +157,17 @@ proc dispatchTool*(
     toolWriteFile(root, args{"path"}.getStr, args{"content"}.getStr, allowDangerous)
   of "shell":
     toolShell(args{"command"}.getStr, allowDangerous)
+  of "git_status":
+    let g = findExe("git")
+    if g.len == 0:
+      return ToolResult(ok: false, output: "git not found")
+    let (outp, _) = execCmdEx(quoteShell(g) & " status -sb", workingDir = root)
+    ToolResult(ok: true, output: truncateOut(outp))
+  of "invoke_skill":
+    if skillBody.len > 0:
+      ToolResult(ok: true, output: skillBody)
+    else:
+      ToolResult(ok: false, output: "skill not found: " & args{"name"}.getStr)
   else:
+    # MCP tools are handled by caller with mcp_ prefix
     ToolResult(ok: false, output: "unknown tool: " & name)

@@ -11,9 +11,12 @@ import ./fs/[io, clipboard, watcher]
 import ./commands/dispatch
 import ./editor/context_menu
 import ./highlight/engine
+import ./highlight/treesitter
 import ./outline/extract
 import ./preview/render
-import ./ai/[provider, rag, rtk]
+import ./ai/[provider, rag, rtk, skills, mcp]
+import ./git/cmd
+import std/tables
 import ./theme
 import ./ui/brand
 import ./audio/player
@@ -26,6 +29,10 @@ type
     fpOutlines
     fpCommand
     fpAi
+
+  EditorMode* = enum
+    emInsert
+    emNormal
 
   PanelRects* = object
     header*, tabs*, left*, center*, right*, bottom*: Rect
@@ -53,6 +60,9 @@ type
     audio*: AudioPlayer
     lastFrameMs*: float
     panelRects*: PanelRects
+    editorMode*: EditorMode
+    vimPending*: string ## multi-key (dd, gg, yy)
+    yankBuffer*: string
 
 proc setStatus*(app: var App, msg: string, secs = 3.0) =
   app.statusMsg = msg
@@ -100,9 +110,17 @@ proc initApp*(cfg: Config): App =
   result.cwd = if dirExists(cfg.workspace): cfg.workspace else: getCurrentDir()
   result.menu = initContextMenu()
   result.watcher = initFileWatcher()
-  result.ai = initAiSession(cfg.ai, getConfigDir() / "tai" / "cache", result.cwd)
+  setTheme(cfg.theme)
+  result.ai = initAiSession(
+    cfg.ai,
+    getConfigDir() / "tai" / "cache",
+    result.cwd,
+    cfg.hooks,
+    cfg.mcpServers,
+  )
   result.audio = initAudioPlayer(cfg.audio.url)
   result.focus = fpEditor
+  result.editorMode = if cfg.keymap == kmVim: emNormal else: emInsert
   result.refreshFileTree()
   result.refreshOutlines()
   result.setStatus("Tai v" & TaiVersion & " — :help")
@@ -224,7 +242,7 @@ proc drawEditor(app: var App, f: var Frame, area: Rect) =
   let endLine = min(lines.high, app.scrollY + viewH - 1)
   let highlighted =
     if doc.previewMode: @[]
-    else: highlightRange(lang, lines, app.scrollY, endLine)
+    else: highlightRangeAuto(app.cfg.highlightEngine, lang, lines, app.scrollY, endLine)
 
   for row in 0 ..< viewH:
     let lineIdx = app.scrollY + row
@@ -360,10 +378,14 @@ proc draw*(app: var App, f: var Frame) =
   app.drawEditor(f, layout.center)
 
   # Bottom: AI + command
-  let agentTag = if app.ai.allowDangerous: "agent" else: "ask"
+  let agentTag = modeName(app.ai.mode)
   let busyTag = if app.ai.busy: " …" else: ""
+  let modeHint =
+    if app.cfg.keymap == kmVim:
+      (if app.editorMode == emNormal: " NORMAL" else: " INSERT")
+    else: ""
   let bottomBlk = initBlock(
-    title = " AI/" & agentTag & busyTag & "  [" & formatGain(app.ai.stats) &
+    title = " AI/" & agentTag & busyTag & modeHint & "  [" & formatGain(app.ai.stats) &
       " | " & $app.lastFrameMs.int & "ms] ",
     borders = AllBorders,
   )
@@ -416,7 +438,7 @@ proc handleAiCommand(app: var App, cmd: string) =
       app.setStatus("logged in (api key)")
     else:
       discard app.ai.startWebLogin()
-      app.setStatus("paste token: :login <token>")
+      app.setStatus(app.ai.messages[^1])
   of "provider":
     if parts.len >= 2:
       app.ai.setProvider(parts[1])
@@ -430,13 +452,45 @@ proc handleAiCommand(app: var App, cmd: string) =
     if m.len > 0:
       app.cfg.ai = app.ai.cfg
       saveConfig(app.cfg)
-  of "agent":
-    if parts.len >= 2 and parts[1].toLowerAscii in ["on", "1", "true"]:
-      app.ai.allowDangerous = true
-      app.setStatus("agent mode: write/shell enabled")
+  of "ask":
+    app.ai.setMode(amAsk)
+    app.cfg.ai.mode = amAsk
+    saveConfig(app.cfg)
+    if parts.len > 1:
+      app.ai.startAskAsync(parts[1 .. ^1].join(" "), app.bufferContext())
     else:
-      app.ai.allowDangerous = false
-      app.setStatus("ask mode: read-only tools")
+      app.setStatus("mode: ask")
+  of "plan":
+    app.ai.setMode(amPlan)
+    app.cfg.ai.mode = amPlan
+    saveConfig(app.cfg)
+    if parts.len > 1:
+      app.ai.startAskAsync(parts[1 .. ^1].join(" "), app.bufferContext())
+    else:
+      app.setStatus("mode: plan (read-only tools)")
+  of "agent":
+    if parts.len >= 2 and parts[1].toLowerAscii in ["off", "0", "false"]:
+      app.ai.setMode(amAsk)
+      app.cfg.ai.mode = amAsk
+      saveConfig(app.cfg)
+      app.setStatus("mode: ask")
+    else:
+      app.ai.setMode(amAgent)
+      app.cfg.ai.mode = amAgent
+      saveConfig(app.cfg)
+      if parts.len > 1 and parts[1].toLowerAscii notin ["on", "1", "true"]:
+        app.ai.startAskAsync(parts[1 .. ^1].join(" "), app.bufferContext())
+      else:
+        app.setStatus("mode: agent (write/shell enabled)")
+  of "mode":
+    if parts.len < 2:
+      app.setStatus("usage: :mode ask|plan|agent  (now: " & modeName(app.ai.mode) & ")")
+    else:
+      let m = parseMode(parts[1])
+      app.ai.setMode(m)
+      app.cfg.ai.mode = m
+      saveConfig(app.cfg)
+      app.setStatus("mode: " & modeName(m))
   of "clear":
     app.ai.clearChat()
     app.setStatus("chat cleared")
@@ -450,8 +504,8 @@ proc handleAiCommand(app: var App, cmd: string) =
     if parts.len < 2:
       app.setStatus("usage: :shell <command>")
       return
-    if not app.ai.allowDangerous:
-      app.setStatus("shell blocked — :agent on first")
+    if app.ai.mode != amAgent:
+      app.setStatus("shell blocked — :agent first")
       return
     let cmdLine = parts[1 .. ^1].join(" ")
     let r = runWithRtk(cmdLine)
@@ -459,6 +513,57 @@ proc handleAiCommand(app: var App, cmd: string) =
     app.ai.pushMsg "shell" & (if r.usedRtk: " (rtk)" else: "") & ": " & cmdLine
     for line in r.output.splitLines():
       app.ai.pushMsg "  " & line
+  of "git":
+    if parts.len < 2:
+      app.setStatus("usage: :git status|diff|log|branch|add|commit")
+      return
+    let sub = parts[1].toLowerAscii
+    var gr: GitResult
+    case sub
+    of "status": gr = gitStatus(app.cwd)
+    of "diff": gr = gitDiff(app.cwd)
+    of "log": gr = gitLog(app.cwd)
+    of "branch": gr = gitBranch(app.cwd)
+    of "add":
+      let paths = if parts.len > 2: parts[2 .. ^1] else: @[]
+      gr = gitAdd(app.cwd, paths)
+    of "commit":
+      if parts.len < 3:
+        app.setStatus("usage: :git commit <message>")
+        return
+      gr = gitCommit(app.cwd, parts[2 .. ^1].join(" "))
+    else:
+      app.setStatus("unknown :git subcommand")
+      return
+    app.ai.pushMsg "git " & sub & ":"
+    for line in gr.output.splitLines():
+      app.ai.pushMsg "  " & line
+    app.setStatus(if gr.ok: "git " & sub & " ok" else: "git " & sub & " failed")
+  of "mcp":
+    if parts.len < 2:
+      app.setStatus("usage: :mcp list|reload")
+      return
+    case parts[1].toLowerAscii
+    of "list":
+      app.ai.mcp.ensureStarted()
+      app.ai.pushMsg app.ai.mcp.listSummary()
+      app.setStatus("mcp list")
+    of "reload":
+      app.ai.mcp.servers = app.cfg.mcpServers
+      app.ai.mcp.reload()
+      app.ai.pushMsg app.ai.mcp.listSummary()
+      app.setStatus("mcp reloaded")
+    else:
+      app.setStatus("usage: :mcp list|reload")
+  of "skills", "skill":
+    app.ai.skills = discoverSkills(app.cwd)
+    app.ai.rebuildSystem()
+    if app.ai.skills.len == 0:
+      app.setStatus("no skills found")
+    else:
+      var names: seq[string]
+      for n, _ in app.ai.skills: names.add n
+      app.setStatus("skills: " & names.join(", "))
   of "ai":
     let prompt = if parts.len > 1: parts[1 .. ^1].join(" ") else: ""
     if prompt.len == 0:
@@ -517,6 +622,10 @@ proc runCommand(app: var App, line: string) =
     app.setStatus(r.message)
     saveConfig(app.cfg)
   elif r.ok:
+    if r.message.startsWith("theme:"):
+      setTheme(app.cfg.theme)
+    if r.message.startsWith("keymap:"):
+      app.editorMode = if app.cfg.keymap == kmVim: emNormal else: emInsert
     if r.message.len > 0:
       app.setStatus(r.message)
     if r.quit:
@@ -539,7 +648,102 @@ proc moveCursor(app: var App, drow, dcol: int, selecting: bool) =
   let h = max(1, app.panelRects.center.height.int - 2)
   app.ensureCursorVisible(h)
 
+proc handleVimNormal(app: var App, key: KeyEvent): bool =
+  ## Returns true if the key was handled in normal mode.
+  var doc = app.tabs.current
+  if key.code == kcChar and kmCtrl notin key.mods:
+    let ch = key.rune.toUTF8
+    let pending = app.vimPending & ch
+    app.vimPending = ""
+    case pending
+    of "h":
+      app.moveCursor(0, -1, false); return true
+    of "l":
+      app.moveCursor(0, 1, false); return true
+    of "j":
+      app.moveCursor(1, 0, false); return true
+    of "k":
+      app.moveCursor(-1, 0, false); return true
+    of "0":
+      doc.cursor.col = 0
+      app.tabs.docs[app.tabs.active] = doc
+      return true
+    of "$":
+      doc.cursor.col = doc.lines[doc.cursor.row].len
+      app.tabs.docs[app.tabs.active] = doc
+      return true
+    of "i":
+      app.editorMode = emInsert
+      app.setStatus("-- INSERT --")
+      return true
+    of "a":
+      app.moveCursor(0, 1, false)
+      app.editorMode = emInsert
+      app.setStatus("-- INSERT --")
+      return true
+    of "v":
+      doc.beginSelection()
+      app.tabs.docs[app.tabs.active] = doc
+      return true
+    of "u":
+      doc.undo()
+      app.tabs.docs[app.tabs.active] = doc
+      return true
+    of "p":
+      if app.yankBuffer.len > 0:
+        doc.insertText(app.yankBuffer)
+        app.tabs.docs[app.tabs.active] = doc
+      return true
+    of "G":
+      doc.setCursor(Cursor(row: doc.lines.high, col: 0))
+      app.tabs.docs[app.tabs.active] = doc
+      app.scrollY = max(0, doc.cursor.row - 2)
+      return true
+    of "gg":
+      doc.setCursor(Cursor(row: 0, col: 0))
+      app.tabs.docs[app.tabs.active] = doc
+      app.scrollY = 0
+      return true
+    of "dd":
+      if doc.lines.len > 0:
+        app.yankBuffer = doc.lines[doc.cursor.row] & "\n"
+        if doc.lines.len == 1:
+          doc.lines = @[""]
+        else:
+          doc.lines.delete(doc.cursor.row)
+          if doc.cursor.row > doc.lines.high:
+            doc.cursor.row = doc.lines.high
+        doc.dirty = true
+        app.tabs.docs[app.tabs.active] = doc
+        app.refreshOutlines()
+      return true
+    of "yy":
+      if doc.lines.len > 0:
+        app.yankBuffer = doc.lines[doc.cursor.row] & "\n"
+      return true
+    of "g", "d", "y":
+      app.vimPending = pending
+      return true
+    of ":":
+      app.commandMode = true
+      app.commandLine = ""
+      return true
+    else:
+      return true # swallow unknown in normal
+  if key.code in {kcLeft, kcRight, kcUp, kcDown, kcHome, kcEnd, kcPageUp, kcPageDown}:
+    # arrows still work
+    return false
+  true
+
 proc handleEditorKey(app: var App, key: KeyEvent) =
+  if app.cfg.keymap == kmVim and app.editorMode == emNormal:
+    if app.handleVimNormal(key):
+      return
+  if app.cfg.keymap == kmVim and app.editorMode == emInsert and key.code == kcEsc:
+    app.editorMode = emNormal
+    app.setStatus("-- NORMAL --")
+    return
+
   var doc = app.tabs.current
   let selecting = kmShift in key.mods
   case key.code
@@ -880,9 +1084,10 @@ proc handleEvent*(app: var App, ev: Event) =
       else:
         discard
       return
-    # Start command mode
+    # Start command mode (Helix always; Vim only from NORMAL)
     if key.code == kcChar and key.rune.toUTF8 == ":" and kmCtrl notin key.mods and
-        app.focus == fpEditor:
+        app.focus == fpEditor and
+        (app.cfg.keymap != kmVim or app.editorMode == emNormal):
       app.commandMode = true
       app.commandLine = ""
       return
@@ -926,11 +1131,13 @@ proc runApp*(app: var App) =
   enableMouse()
   defer:
     state[].audio.stop()
+    state[].ai.mcp.shutdown()
     disableMouse()
     term.restore()
     app = state[]
   while not state.quit:
     discard state[].ai.pollAiEvents()
+    state[].ai.pollOAuth()
     state[].audio.pollAlive()
     for path in state.watcher.poll():
       if state.tabs.current.path == path and not state.tabs.current.dirty:

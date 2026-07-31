@@ -5,7 +5,10 @@ import ../src/tai/config
 import ../src/tai/highlight/engine
 import ../src/tai/outline/extract
 import ../src/tai/preview/render
-import ../src/tai/ai/[cache, rag, tools]
+import ../src/tai/ai/[cache, rag, tools, sse]
+import ../src/tai/config
+import ../src/tai/git/cmd
+import ../src/tai/theme
 import tatui
 import tatui/core/rect
 
@@ -88,7 +91,26 @@ proc testTools() =
   doAssert readme.output.contains("Tai")
   let blocked = toolShell("echo hi", allowed = false)
   doAssert blocked.needsApproval
+  doAssert toolAllowed(amPlan, "read_file")
+  doAssert not toolAllowed(amPlan, "write_file")
+  doAssert toolAllowed(amAgent, "shell")
   echo "testTools ok"
+
+proc testSseGitTheme() =
+  let noneLine = parseSseDataLine(": ping")
+  doAssert noneLine.isNone
+  let done = parseSseDataLine("data: [DONE]")
+  doAssert done.isNone
+  let chunk = parseSseDataLine("""data: {"choices":[{"delta":{"content":"hi"}}]}""")
+  doAssert chunk.isSome
+  doAssert deltaContent(chunk.get) == "hi"
+  let gs = gitStatus(getCurrentDir())
+  discard gs.ok
+  setTheme(thGruvboxDark)
+  doAssert ActiveId == thGruvboxDark
+  setTheme(thTokyoNight)
+  doAssert parseMode("plan") == amPlan
+  echo "testSseGitTheme ok"
 
 proc testLayoutSmoke() =
   let area = rect(0, 0, 120, 40)
@@ -105,5 +127,6 @@ when isMainModule:
   testOutlinePreview()
   testCacheRag()
   testTools()
+  testSseGitTheme()
   testLayoutSmoke()
   echo "all tests passed"

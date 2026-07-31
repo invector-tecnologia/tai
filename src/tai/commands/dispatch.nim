@@ -11,9 +11,9 @@ type
     message*: string
     quit*: bool
     redraw*: bool
-    newCwd*: string       ## non-empty → app should refresh file tree
-    openPath*: string     ## non-empty → app should open via openPath
-    aiCmd*: string        ## non-empty → AI command payload (without prefix)
+    newCwd*: string
+    openPath*: string
+    aiCmd*: string
 
   CommandContext* = object
     cfg*: ptr Config
@@ -25,6 +25,11 @@ proc okResult(msg: string, quit = false): CommandResult =
 
 proc errResult(msg: string): CommandResult =
   CommandResult(ok: false, message: msg, quit: false, redraw: true)
+
+const AiHeads = [
+  "ai", "login", "provider", "model", "rag", "shell", "clear", "audio",
+  "ask", "plan", "agent", "mode", "git", "mcp", "skill", "skills",
+]
 
 proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
   let line = raw.strip()
@@ -87,8 +92,9 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
     return okResult("source mode")
   of "set":
     if args.len < 2:
-      return errResult("usage: :set file_tree left|right")
-    if args[0] == "file_tree":
+      return errResult("usage: :set file_tree|theme|keymap|highlight_engine <value>")
+    case args[0].toLowerAscii
+    of "file_tree":
       case args[1].toLowerAscii
       of "left":
         ctx.cfg[].fileTreeSide = ftsLeft
@@ -98,7 +104,17 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
         return okResult("file tree: right")
       else:
         return errResult("expected left|right")
-    return errResult("unknown setting")
+    of "theme":
+      ctx.cfg[].theme = parseTheme(args[1])
+      return okResult("theme: " & themeName(ctx.cfg[].theme))
+    of "keymap":
+      ctx.cfg[].keymap = parseKeymap(args[1])
+      return okResult("keymap: " & (if ctx.cfg[].keymap == kmVim: "vim" else: "helix"))
+    of "highlight_engine", "highlight":
+      ctx.cfg[].highlightEngine = parseHighlightEngine(args[1])
+      return okResult("highlight_engine set")
+    else:
+      return errResult("unknown setting")
   of "cd":
     if args.len == 0:
       return errResult("usage: :cd <path>")
@@ -112,11 +128,10 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
     return r
   of "help":
     return okResult(
-      ":q :w :wq :e :hide/:show [outlines|files] :preview :source " &
-      ":set file_tree left|right :cd :ai :login :provider :model :rag :shell :audio"
+      ":q :w :e :set theme|keymap|file_tree :ask :plan :agent :git :mcp :audio :login"
     )
   else:
-    if head in ["ai", "login", "provider", "model", "rag", "shell", "clear", "audio"]:
+    if head in AiHeads:
       var r = okResult("")
       r.aiCmd = cmd
       return r

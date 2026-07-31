@@ -1,4 +1,4 @@
-# ADR-0004: AI harness caches, tools, and RTK
+# ADR-0004: AI harness caches, tools, streaming, MCP
 
 - Status: Accepted
 - Date: 2026-07-31
@@ -6,18 +6,16 @@
 
 ## Context
 
-Agent chat burns tokens on repeated prompts, shell noise, and workspace context. Competitors expect a tool loop, project memory, and interruptible requests.
+Agent chat needs streaming UX, modes, external tools, and optional OAuth.
 
 ## Decision
 
-- Prompt cache + context transcript compaction + **exact-match response cache** (JSON on disk)
-- Workspace keyword RAG retrieval
-- Optional [RTK](https://github.com/rtk-ai/rtk) wrapping of shell output
-- Built-in tools (`read_file`, `list_dir`, `grep`, `write_file`, `shell`) with `:agent on` gating writes/shell
-- Load `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` into the system prompt
-- Background worker thread for HTTP so the TUI keeps polling; Esc requests cancel between tool rounds
-- Providers: OpenAI-compatible, Anthropic, Ollama. Auth via API key / env / `:login <token>` (token paste; no OAuth loopback yet)
+- Modes: **ask** (no tools), **plan** (read-only tools + numbered plan), **agent** (read/write/shell + MCP/skills)
+- Token streaming via SSE (`stream: true`) for text-only OpenAI-compat and Anthropic; tool rounds stay buffered then stream final text
+- Built-in tools + optional MCP stdio servers + SKILL.md discovery + shell hooks
+- Exact-match response cache, keyword RAG, optional RTK
+- OAuth device-code when `oauth_client_id` / `device_auth_url` / `token_url` configured; else `:login <token>`
 
 ## Consequences
 
-Honest naming: response cache is not embedding-semantic. Streaming token deltas and MCP remain backlog.
+MCP HTTP transport and native tree-sitter spans remain follow-ups.
