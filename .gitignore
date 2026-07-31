@@ -9,3 +9,5 @@ htmldocs/
 .env
 *.db
 *.db-journal
+tests/all_tests
+/tests/all_tests
