@@ -1,0 +1,11 @@
+nimcache/
+nimblecache/
+*.exe
+*.out
+/tai
+htmldocs/
+*.log
+.DS_Store
+.env
+*.db
+*.db-journal
