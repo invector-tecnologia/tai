@@ -1,6 +1,7 @@
 ## ASCII block banner and credit line for the header.
 
 import std/strutils
+import tatui/core/unicodewidth
 import ../version
 
 const
@@ -18,7 +19,8 @@ const
   BannerCompact* = "█ TAI EDITOR █"
 
 proc bannerLines*(width: int): seq[string] =
-  if width >= BannerFull[0].len:
+  ## Prefer the full banner when it fits by *display* columns, not bytes.
+  if width >= displayWidth(BannerFull[0]):
     for row in BannerFull:
       result.add row
   else:
@@ -29,7 +31,7 @@ proc creditWithVersion*(width: int): string =
   let left = CreditLine
   if width < 20:
     return ver
-  if left.len + 2 + ver.len <= width:
-    let pad = width - left.len - ver.len
+  if displayWidth(left) + 2 + displayWidth(ver) <= width:
+    let pad = width - displayWidth(left) - displayWidth(ver)
     return left & repeat(' ', max(1, pad)) & ver
   ver

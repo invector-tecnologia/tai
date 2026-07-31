@@ -14,3 +14,7 @@ tests/all_tests
 nimble.develop
 nimble.paths
 nimbledeps
+
+tests/repro_bad_utf
+tests/repro_draw
+tests/repro_pdf

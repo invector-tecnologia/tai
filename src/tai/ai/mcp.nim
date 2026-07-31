@@ -1,6 +1,6 @@
 ## Minimal MCP stdio JSON-RPC client.
 
-import std/[os, osproc, json, strutils, tables, streams]
+import std/[osproc, json, strutils, tables, streams]
 import ../config
 
 type

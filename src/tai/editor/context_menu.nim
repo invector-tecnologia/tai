@@ -77,7 +77,8 @@ proc hitTest*(m: ContextMenu, col, row: int): Option[MenuAction] =
   if not m.visible or m.area.isEmpty:
     return none(MenuAction)
   if m.area.contains(col, row):
-    let idx = row - m.area.top
+    # Skip top border row of the block.
+    let idx = row - m.area.top - 1
     return some(m.actionAt(idx))
   none(MenuAction)
 

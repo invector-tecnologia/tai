@@ -77,7 +77,7 @@ Or inside Tai: `:login <token>` then `:provider openai|anthropic|ollama` and `:m
 | **Outlines** | Jump to symbols / headings |
 | **AI** (bottom) | Transcript + `ai>` prompt or `:` command line |
 
-`Tab` cycles focus: Editor → Files → Outlines → AI → Editor.
+`Shift-Tab` cycles focus across **visible** panels: Editor → Files → Outlines → AI → Editor. Hidden sides (`:hide files` / `:hide outlines`) are skipped. `Tab` indents in the editor.
 
 Hide sides: `:hide files` · `:hide outlines` (alias `:hide arquivos`).  
 Swap file tree: `:set file_tree left|right`.
@@ -94,8 +94,11 @@ Swap file tree: `:set file_tree left|right`.
 | `Ctrl-C` `X` `V` `A` | Copy / cut / paste / select all |
 | `Ctrl-W` | Close active tab (prompts if unsaved) |
 | `Ctrl-N` / `Ctrl-P` | Next / previous tab |
+| `Shift-Tab` | Cycle panels (Editor → Files → Outlines → AI) |
+| `Tab` | Indent in editor |
+| `Esc` | From Files/Outlines/AI → Editor (or close menu) |
 | `Ctrl-Q` | Quit |
-| Mouse | Click, drag-select, scroll; right-click Edit menu in the editor |
+| Mouse | Click, drag-select, scroll; right-click opens centered menu |
 
 ### Tabs
 

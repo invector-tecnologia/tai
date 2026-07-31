@@ -1,6 +1,6 @@
 ## Tree-sitter highlight backend with regex fallback.
 
-import std/[os, osproc, strutils, options]
+import std/[os, strutils, options]
 import ../config
 import ./engine
 

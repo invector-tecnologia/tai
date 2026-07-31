@@ -1,8 +1,8 @@
 ## Incremental regex/rule-based syntax highlighter (tree-sitter-ready interface).
 
-import std/[os, strutils, sets, options]
+import std/[os, strutils, sets, unicode]
 import tatui
-import tatui/core/[color, style]
+import tatui/core/style
 import ../theme
 
 type
@@ -19,7 +19,7 @@ type
     tkFunction
 
   TokenSpan* = object
-    start*, finish*: int
+    start*, finish*: int ## Byte offsets into the line (UTF-8 safe; never mid-rune).
     kind*: TokenKind
 
   HighlightedLine* = object
@@ -100,8 +100,22 @@ proc addSpan(spans: var seq[TokenSpan], start, finish: int, kind: TokenKind) =
   if finish > start:
     spans.add TokenSpan(start: start, finish: finish, kind: kind)
 
-proc isWordChar(c: char): bool =
-  c.isAlphaNumeric or c == '_'
+proc advanceRune(s: string, i: var int) =
+  ## Advance `i` by one full UTF-8 rune (clamped; always progresses).
+  if i < s.len:
+    let n = min(runeLenAt(s, i), s.len - i)
+    i += max(1, n)
+
+proc addPlainRune(spans: var seq[TokenSpan], s: string, i: var int) =
+  let start = i
+  advanceRune(s, i)
+  addSpan(spans, start, i, tkPlain)
+
+proc isWordRune(r: Rune): bool =
+  if r.isAlpha or r == Rune('_'):
+    return true
+  let c = r.int32
+  c >= ord('0') and c <= ord('9')
 
 const
   NimKeywords = [
@@ -149,10 +163,10 @@ proc highlightKeywords(line: string, keywords: HashSet[string], commentPrefix = 
         inc j
       addSpan(result.spans, i, j, tkNumber)
       i = j
-    elif c.isAlphaAscii or c == '_':
+    elif c.isAlphaAscii or c == '_' or isWordRune(line.runeAt(i)):
       var j = i
-      while j < line.len and line[j].isWordChar:
-        inc j
+      while j < line.len and isWordRune(line.runeAt(j)):
+        advanceRune(line, j)
       let word = line[i ..< j]
       let kind = if word in keywords: tkKeyword else: tkPlain
       addSpan(result.spans, i, j, kind)
@@ -161,11 +175,10 @@ proc highlightKeywords(line: string, keywords: HashSet[string], commentPrefix = 
       addSpan(result.spans, i, i + 1, tkPunct)
       inc i
     else:
-      addSpan(result.spans, i, i + 1, tkPlain)
-      inc i
+      addPlainRune(result.spans, line, i)
 
 proc highlightMarkdown(line: string): HighlightedLine =
-  let t = line.strip(trailing = false)
+  let t = strutils.strip(line, trailing = false)
   if t.startsWith("#"):
     addSpan(result.spans, 0, line.len, tkHeader)
   elif t.startsWith("```") or t.startsWith("---"):
@@ -184,21 +197,20 @@ proc highlightMarkdown(line: string): HighlightedLine =
         addSpan(result.spans, i, j, tkString)
         i = j
       else:
-        addSpan(result.spans, i, i + 1, tkPlain)
-        inc i
+        addPlainRune(result.spans, line, i)
 
 proc highlightYamlLike(line: string, comment = "#"): HighlightedLine =
-  let stripped = line.strip(trailing = false)
+  let stripped = strutils.strip(line, trailing = false)
   if stripped.startsWith(comment):
     addSpan(result.spans, 0, line.len, tkComment)
     return
   let colon = line.find(':')
-  if colon > 0 and not line.strip().startsWith('-'):
+  if colon > 0 and not strutils.strip(line).startsWith('-'):
     addSpan(result.spans, 0, colon, tkKey)
     addSpan(result.spans, colon, colon + 1, tkPunct)
     if colon + 1 < line.len:
       let rest = line[colon + 1 .. ^1]
-      let rs = rest.strip(trailing = false)
+      let rs = strutils.strip(rest, trailing = false)
       if rs.startsWith('"') or rs.startsWith('\''):
         addSpan(result.spans, colon + 1, line.len, tkString)
       elif rs.len > 0 and rs[0].isDigit:
@@ -246,8 +258,7 @@ proc highlightJson(line: string): HighlightedLine =
       addSpan(result.spans, i, i + word.len, tkKeyword)
       i += word.len
     else:
-      addSpan(result.spans, i, i + 1, tkPlain)
-      inc i
+      addPlainRune(result.spans, line, i)
 
 proc highlightXml(line: string): HighlightedLine =
   var i = 0
@@ -269,8 +280,7 @@ proc highlightXml(line: string): HighlightedLine =
       addSpan(result.spans, i, j, tkString)
       i = j
     else:
-      addSpan(result.spans, i, i + 1, tkPlain)
-      inc i
+      addPlainRune(result.spans, line, i)
 
 proc highlightLine*(lang: LangId, line: string): HighlightedLine =
   case lang

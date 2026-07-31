@@ -1,6 +1,7 @@
 import std/[os, strutils, options]
 import ../src/tai/buffer/document
 import ../src/tai/buffer/tabs
+import ../src/tai/buffer/wrap
 import ../src/tai/commands/dispatch
 import ../src/tai/config
 import ../src/tai/highlight/engine
@@ -10,6 +11,9 @@ import ../src/tai/ai/[cache, rag, tools, sse]
 import ../src/tai/config
 import ../src/tai/git/cmd
 import ../src/tai/theme
+import ../src/tai/fs/io
+import ../src/tai/ui/utf8clip
+import ../src/tai/app as taiapp
 import tatui
 import tatui/core/rect
 
@@ -43,6 +47,26 @@ proc testTabs() =
   doAssert tm.docs.len == 1
   doAssert tm.docs[0].path.len == 0
   echo "testTabs ok"
+
+proc testWrap() =
+  doAssert shouldSoftWrap("hello world", false)
+  doAssert not shouldSoftWrap("| a | b |", false)
+  doAssert not shouldSoftWrap("```nim", false)
+  doAssert not shouldSoftWrap("code here", true)
+  let prose = "word " & repeat("longword ", 20)
+  let rows = buildVisualRows(@[prose], 20)
+  doAssert rows.len > 1
+  let table = buildVisualRows(@["| a | b | c |"], 10)
+  doAssert table.len == 1
+  doAssert table[0].hard
+  let fenced = buildVisualRows(@["```", "a very long line that would wrap if prose", "```"], 10)
+  doAssert fenced.len == 3
+  doAssert fenced[1].hard
+  doAssert fenced[1].endByte == "a very long line that would wrap if prose".len
+  # Invalid UTF-8 continuation bytes must not crash (PDF-like lines)
+  let binaryRows = buildVisualRows(@["\x80\x80", "\xff\xfe| a |", "%PDF-1.4"], 40)
+  doAssert binaryRows.len == 3
+  echo "testWrap ok"
 
 proc testCommands() =
   let prev = getCurrentDir()
@@ -81,7 +105,33 @@ proc testHighlight() =
   doAssert md.spans[0].kind == tkHeader
   let range = highlightRange(langNim, @["proc foo() = discard", "let x = 1"], 0, 1)
   doAssert range.len == 2
+  # UTF-8 must not be split mid-rune (scroll/ghost glyph bug)
+  let utf = "Documentação contém visão"
+  let utfHl = highlightLine(langMarkdown, utf)
+  var rebuilt = ""
+  for sp in utfHl.spans:
+    doAssert sp.start >= 0 and sp.finish <= utf.len
+    doAssert sp.start < sp.finish
+    doAssert (utf[sp.start].uint8 and 0xC0'u8) != 0x80'u8 # not a continuation byte
+    rebuilt.add utf[sp.start ..< sp.finish]
+  doAssert rebuilt == utf
   echo "testHighlight ok"
+
+proc testUtf8Clip() =
+  let s = "ação"
+  doAssert floorRuneIndex(s, 2) == 1 # mid-byte of ç → start of ç
+  doAssert clipToDisplayWidth(s, 2) == "aç"
+  doAssert clipToDisplayWidth("hello", 3) == "hel"
+  doAssert displayColAtByte(s, byteAtDisplayCol(s, 2)) == 2
+  # Incomplete UTF-8 must not IndexDefect
+  let bad = "hello" & "\xC3"
+  doAssert safeRuneLen(bad, bad.len - 1) == 1
+  var i = 0
+  while i < bad.len:
+    let n = safeRuneLen(bad, i)
+    discard bad[i ..< i + n]
+    i += n
+  echo "testUtf8Clip ok"
 
 proc testOutlinePreview() =
   let doc = fromText("# A\n\n## B\ntext", "x.md")
@@ -140,14 +190,61 @@ proc testLayoutSmoke() =
   doAssert cols.len == 3
   echo "testLayoutSmoke ok"
 
+proc testFocusCycle() =
+  var cfg = defaultConfig()
+  cfg.audio.autoplay = false
+  cfg.filesVisible = true
+  cfg.outlinesVisible = true
+  var app = initApp(cfg)
+  doAssert app.focusRing() == @[fpEditor, fpFileTree, fpOutlines, fpAi]
+  doAssert app.focus == fpEditor
+  app.cycleFocus(1)
+  doAssert app.focus == fpFileTree
+  app.cycleFocus(1)
+  doAssert app.focus == fpOutlines
+  app.cycleFocus(1)
+  doAssert app.focus == fpAi
+  app.cycleFocus(1)
+  doAssert app.focus == fpEditor
+  # one-way ring (Shift-Tab only)
+  app.focus = fpAi
+  app.cfg.filesVisible = false
+  app.cfg.outlinesVisible = false
+  app.ensureFocusVisible()
+  doAssert app.focus == fpAi # still visible
+  app.focus = fpFileTree
+  app.ensureFocusVisible()
+  doAssert app.focus == fpEditor
+  doAssert app.focusRing() == @[fpEditor, fpAi]
+  app.cycleFocus(1)
+  doAssert app.focus == fpAi
+  app.cycleFocus(1)
+  doAssert app.focus == fpEditor
+  echo "testFocusCycle ok"
+
+proc testBinaryLoad() =
+  doAssert looksBinary("%PDF-1.4\nstream", "x.pdf")
+  doAssert looksBinary("\x00\x01\x02hello", "x.txt")
+  doAssert not looksBinary("# hello\nworld\n", "readme.md")
+  writeFile("/tmp/tai_bin_test.pdf", "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+  let r = loadFile("/tmp/tai_bin_test.pdf")
+  doAssert not r.ok
+  doAssert r.refuse
+  doAssert r.error.contains("binary")
+  echo "testBinaryLoad ok"
+
 when isMainModule:
   testDocument()
   testTabs()
+  testWrap()
   testCommands()
   testHighlight()
+  testUtf8Clip()
   testOutlinePreview()
   testCacheRag()
   testTools()
   testSseGitTheme()
   testLayoutSmoke()
+  testFocusCycle()
+  testBinaryLoad()
   echo "all tests passed"

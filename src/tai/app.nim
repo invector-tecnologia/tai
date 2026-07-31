@@ -1,12 +1,11 @@
 ## Application state, layout, draw loop, and input handling.
 
-import std/[os, strutils, options, times]
-from std/unicode import toUTF8, Rune
+import std/[os, strutils, options, times, unicode]
 import tatui
-import tatui/core/[rect, color, style]
+import tatui/core/[rect, style, unicodewidth]
 
 import ./config
-import ./buffer/[document, tabs]
+import ./buffer/[document, tabs, wrap]
 import ./fs/[io, clipboard, watcher]
 import ./commands/dispatch
 import ./editor/context_menu
@@ -19,6 +18,7 @@ import ./git/cmd
 import std/tables
 import ./theme
 import ./ui/brand
+import ./ui/utf8clip
 import ./audio/player
 import ./version
 
@@ -67,6 +67,7 @@ type
     confirmTab*: int
     confirmSelected*: int ## 0=Salvar, 1=Não salvar, 2=Cancelar
     confirmArea*: Rect
+    preferredCol*: int ## display column for visual-line up/down
 
 proc setStatus*(app: var App, msg: string, secs = 3.0) =
   app.statusMsg = msg
@@ -91,6 +92,8 @@ proc openPath*(app: var App, path: string) =
     app.refreshOutlines()
     app.setStatus("opened " & path.extractFilename & " in " &
       $loaded.elapsedMs.int & "ms")
+  elif loaded.refuse:
+    app.setStatus(loaded.error)
   else:
     var doc = emptyDocument(path)
     app.tabs.openDoc(doc)
@@ -196,6 +199,36 @@ proc outlinesArea(app: App): Rect =
   if app.cfg.fileTreeSide == ftsLeft: app.panelRects.right
   else: app.panelRects.left
 
+proc focusRing*(app: App): seq[FocusPanel] =
+  ## Visible panels in Tab order: Editor → Files → Outlines → AI.
+  result = @[fpEditor]
+  if app.cfg.filesVisible:
+    result.add fpFileTree
+  if app.cfg.outlinesVisible:
+    result.add fpOutlines
+  result.add fpAi
+
+proc ensureFocusVisible*(app: var App) =
+  ## Snap focus back to the editor if it points at a hidden panel.
+  let ring = app.focusRing()
+  if app.focus notin ring:
+    app.focus = fpEditor
+
+proc cycleFocus*(app: var App, dir: int) =
+  ## Move focus along `focusRing` by `dir` (+1 forward / -1 back).
+  app.ensureFocusVisible()
+  let ring = app.focusRing()
+  if ring.len == 0:
+    return
+  var idx = 0
+  for i, p in ring:
+    if p == app.focus:
+      idx = i
+      break
+  let n = ring.len
+  idx = ((idx + dir) mod n + n) mod n
+  app.focus = ring[idx]
+
 proc tabIndexAt(app: App, col, row: int): int =
   if not app.panelRects.tabs.contains(col, row):
     return -1
@@ -224,12 +257,16 @@ proc performCloseTab(app: var App, index: int) =
   app.scrollY = 0
   app.refreshOutlines()
 
+proc overlayOpen(app: App): bool =
+  app.menu.visible or app.confirmClose
+
 proc requestCloseTab*(app: var App, index: int) =
   if index < 0 or index >= app.tabs.docs.len:
     return
   if not app.tabs.docs[index].dirty:
     app.performCloseTab(index)
     return
+  app.menu.close()
   app.confirmClose = true
   app.confirmTab = index
   app.confirmSelected = 0
@@ -275,11 +312,12 @@ proc drawConfirmClose(app: var App, f: var Frame) =
     else: "?"
   let msg = "Salvar alterações em " & name & "?"
   const options = ["Salvar", "Não salvar", "Cancelar"]
-  var maxW = msg.len
+  var maxW = displayWidth(msg)
   for o in options:
-    maxW = max(maxW, o.len)
-  let w = maxW + 4
-  let h = 1 + options.len # message + options
+    maxW = max(maxW, displayWidth(o))
+  # Include border rows/cols so all three options stay visible.
+  let w = maxW + 6
+  let h = 2 + 1 + options.len
   var x = max(0, (f.area.width.int - w) div 2)
   var y = max(0, (f.area.height.int - h) div 2)
   if x + w > f.area.right: x = max(0, f.area.right - w)
@@ -307,11 +345,12 @@ proc drawContextMenu(app: var App, f: var Frame) =
     return
   var maxLabel = 0
   for item in app.menu.items:
-    maxLabel = max(maxLabel, item.label.len)
-  let w = max(16, maxLabel + 4)
-  let h = app.menu.items.len
-  var x = app.menu.x
-  var y = app.menu.y
+    maxLabel = max(maxLabel, displayWidth(item.label))
+  let w = max(18, maxLabel + 6)
+  let h = 2 + app.menu.items.len
+  # Center like the close overlay (ignore click coordinates).
+  var x = max(0, (f.area.width.int - w) div 2)
+  var y = max(0, (f.area.height.int - h) div 2)
   if x + w > f.area.right: x = max(0, f.area.right - w)
   if y + h > f.area.bottom: y = max(0, f.area.bottom - h)
   let area = rect(x, y, w, h)
@@ -326,14 +365,41 @@ proc drawContextMenu(app: var App, f: var Frame) =
         tnHl(Tn.black, Tn.cyan, {mBold})
       else:
         tnFg(Tn.fg)
-    discard f.buf[].setStringN(inner.left, inner.top + i, " " & item.label, st, inner.width.int)
+    if inner.top + i < inner.bottom:
+      discard f.buf[].setStringN(inner.left, inner.top + i, " " & item.label, st, inner.width.int)
+
+proc spanKindAt(hl: HighlightedLine, byteIdx: int): TokenKind =
+  for sp in hl.spans:
+    if byteIdx >= sp.start and byteIdx < sp.finish:
+      return sp.kind
+  tkPlain
+
+proc editorViewWidth(app: App): int =
+  max(1, app.panelRects.center.width.int - 2)
+
+proc editorViewHeight(app: App): int =
+  max(1, app.panelRects.center.height.int - 2)
+
+proc buildEditorVisual(app: App): seq[VisualRow] =
+  buildVisualRows(app.tabs.current.lines, app.editorViewWidth())
+
+proc updatePreferredCol(app: var App) =
+  let doc = app.tabs.current
+  if doc.cursor.row < 0 or doc.cursor.row > doc.lines.high:
+    app.preferredCol = 0
+    return
+  app.preferredCol = displayColAtByte(doc.lines[doc.cursor.row], doc.cursor.col)
 
 proc drawEditor(app: var App, f: var Frame, area: Rect) =
   var doc = app.tabs.current
+  let focused = app.focus == fpEditor
   let title =
     if doc.previewMode: " Preview "
     else: " " & doc.displayName() & " "
-  let blk = initBlock(title = title, borders = AllBorders)
+  var blk = initBlock(title = title, borders = AllBorders)
+  if focused:
+    blk.borderStyle = tnFg(Tn.cyan, {mBold})
+    blk.titleStyle = tnFg(Tn.cyan, {mBold})
   f.renderWidget(blk, area)
   let inner = blk.inner(area)
   if inner.isEmpty:
@@ -350,59 +416,87 @@ proc drawEditor(app: var App, f: var Frame, area: Rect) =
   let lang = detectLang(doc.path)
   let viewH = inner.height.int
   let viewW = inner.width.int
-  if app.scrollY > max(0, lines.len - viewH):
-    app.scrollY = max(0, lines.len - viewH)
+  let visual = buildVisualRows(lines, viewW)
+  if app.scrollY > max(0, visual.len - viewH):
+    app.scrollY = max(0, visual.len - viewH)
 
-  let endLine = min(lines.high, app.scrollY + viewH - 1)
-  let highlighted =
-    if doc.previewMode: @[]
-    else: highlightRangeAuto(app.cfg.highlightEngine, lang, lines, app.scrollY, endLine)
+  let endVis = min(visual.high, app.scrollY + viewH - 1)
+  var hlCache = initTable[int, HighlightedLine]()
+  if not doc.previewMode and visual.len > 0 and app.scrollY <= endVis:
+    var minSrc = visual[app.scrollY].srcLine
+    var maxSrc = visual[endVis].srcLine
+    let highlighted = highlightRangeAuto(app.cfg.highlightEngine, lang, lines, minSrc, maxSrc)
+    for i, hl in highlighted:
+      hlCache[minSrc + i] = hl
 
+  let rowStyle = tnHl(Tn.fg, Tn.bg)
   for row in 0 ..< viewH:
-    let lineIdx = app.scrollY + row
-    if lineIdx > lines.high:
-      break
+    let visIdx = app.scrollY + row
     let y = inner.top + row
-    let line = lines[lineIdx]
-    let visible =
-      if app.scrollX >= line.len: ""
-      else: line[app.scrollX .. ^1]
-    if doc.previewMode or highlighted.len == 0:
-      discard f.buf[].setStringN(inner.left, y, visible, defaultStyle(), viewW)
-    else:
-      let hl = highlighted[lineIdx - app.scrollY]
-      var x = inner.left
-      for span in hl.spans:
-        if span.finish <= app.scrollX: continue
-        let start = max(span.start, app.scrollX)
-        if start >= span.finish: continue
-        let slice = line[start ..< span.finish]
-        let st = tokenStyle(span.kind)
-        let written = f.buf[].setStringN(x, y, slice, st, inner.right - x)
-        x += written
-        if x >= inner.right: break
+    discard f.buf[].setStringN(inner.left, y, repeat(' ', viewW), rowStyle, viewW)
+    if visIdx > visual.high:
+      continue
+    let vr = visual[visIdx]
+    if vr.srcLine > lines.high:
+      continue
+    let line = lines[vr.srcLine]
+    let useHl = not doc.previewMode and hlCache.hasKey(vr.srcLine)
+    let paintStart =
+      if vr.hard: floorRuneIndex(line, app.scrollX)
+      else: vr.startByte
+    let paintEnd = vr.endByte
+    var x = inner.left
+    var i = max(paintStart, vr.startByte)
+    if vr.hard and paintStart > vr.startByte:
+      i = paintStart
+    while i < paintEnd and i < line.len and x < inner.right:
+      let n = safeRuneLen(line, i)
+      let chunk = line[i ..< i + n]
+      let w = displayWidth(chunk)
+      if w <= 0:
+        i += n
+        continue
+      if x + w > inner.right:
+        break
+      let st =
+        if useHl: tokenStyle(spanKindAt(hlCache[vr.srcLine], i))
+        else: rowStyle
+      discard f.buf[].setStringN(x, y, chunk, rowStyle.patch(st), inner.right - x)
+      x += w
+      i += n
     if doc.selection.active and not doc.previewMode:
       let (a, b) = doc.normalizedSelection()
-      if lineIdx >= a.row and lineIdx <= b.row:
+      if vr.srcLine >= a.row and vr.srcLine <= b.row:
         discard f.buf[].setStringN(inner.left, y, "▌", tnFg(Tn.cyan), 1)
 
-  # cursor
   if app.focus == fpEditor and not doc.previewMode and not app.commandMode:
-    let cy = doc.cursor.row - app.scrollY
-    let cx = doc.cursor.col - app.scrollX
-    if cy >= 0 and cy < viewH and cx >= 0 and cx < viewW:
-      f.setCursor(pos(inner.left + cx, inner.top + cy))
+    let vi = visualIndexAt(visual, doc.cursor.row, doc.cursor.col)
+    let cy = vi - app.scrollY
+    if cy >= 0 and cy < viewH and vi <= visual.high:
+      let vr = visual[vi]
+      let line = lines[vr.srcLine]
+      let absCol = displayColAtByte(line, floorRuneIndex(line, doc.cursor.col))
+      let origin =
+        if vr.hard: displayColAtByte(line, floorRuneIndex(line, app.scrollX))
+        else: displayColAtByte(line, vr.startByte)
+      let cx = absCol - origin
+      if cx >= 0 and cx < viewW:
+        f.setCursor(pos(inner.left + cx, inner.top + cy))
 
 proc drawSideList(
-    f: var Frame, area: Rect, title: string, labels: seq[string], state: var ListState
+    f: var Frame, area: Rect, title: string, labels: seq[string], state: var ListState,
+    focused = false,
 ) =
   var items: seq[ListItem]
   for lab in labels:
     items.add listItem(lab)
-  let blk = some(initBlock(title = title, borders = AllBorders))
+  var blk = initBlock(title = title, borders = AllBorders)
+  if focused:
+    blk.borderStyle = tnFg(Tn.cyan, {mBold})
+    blk.titleStyle = tnFg(Tn.cyan, {mBold})
   let lst = list(
     items,
-    blk = blk,
+    blk = some(blk),
     highlightStyle = tnHl(Tn.black, Tn.blue),
     highlightSymbol = "› ",
   )
@@ -416,22 +510,21 @@ proc drawHeader(app: var App, f: var Frame, area: Rect) =
       area.left, area.top + row, repeat(' ', area.width.int),
       tnHl(Tn.fg, Tn.bg), area.width.int
     )
-  let lines = bannerLines(area.width.int)
+  let banner = bannerLines(area.width.int)
   let brandStyle = tnFg(Tn.blue, {mBold})
-  for i, line in lines:
+  for i, line in banner:
     if i >= area.height.int - 1: break
-    let clipped =
-      if line.len > area.width.int: line[0 ..< area.width.int]
-      else: line
+    let clipped = clipToDisplayWidth(line, area.width.int)
     discard f.buf[].setStringN(
       area.left, area.top + i, clipped, brandStyle, area.width.int
     )
   # Credit + version on last banner-adjacent line
-  let creditRow = min(lines.len, area.height.int - 1)
-  let credit = creditWithVersion(max(10, area.width.int - 28))
-  discard f.buf[].setStringN(
-    area.left, area.top + creditRow, credit, tnFg(Tn.comment), area.width.int
-  )
+  let creditRow = max(0, min(banner.len, area.height.int - 1))
+  if creditRow >= 0 and creditRow < area.height.int:
+    let credit = creditWithVersion(max(10, area.width.int - 28))
+    discard f.buf[].setStringN(
+      area.left, area.top + creditRow, credit, tnFg(Tn.comment), area.width.int
+    )
   # Player controls on the right of the credit row
   let playLbl = if app.audio.state == asPlaying: "[❚❚]" else: "[▶]"
   let nextLbl = "[⏭]"
@@ -440,7 +533,7 @@ proc drawHeader(app: var App, f: var Frame, area: Rect) =
   if right.len > area.width.int div 2:
     right = playLbl & " " & nextLbl
   let rx = area.right - right.len
-  if rx > area.left:
+  if creditRow >= 0 and creditRow < area.height.int and rx > area.left:
     let playStyle =
       if app.audio.state == asPlaying: tnFg(Tn.green, {mBold})
       else: tnFg(Tn.cyan, {mBold})
@@ -475,7 +568,7 @@ proc draw*(app: var App, f: var Frame) =
     for e in app.fileEntries:
       labels.add e.name
     var st = app.fileState
-    drawSideList(f, treeArea, " Files ", labels, st)
+    drawSideList(f, treeArea, " Files ", labels, st, focused = app.focus == fpFileTree)
     app.fileState = st
 
   # Outlines
@@ -485,7 +578,7 @@ proc draw*(app: var App, f: var Frame) =
     for o in app.outlineItems:
       labels.add repeat("  ", o.depth) & o.label
     var st = app.outlineState
-    drawSideList(f, outArea, " Outlines ", labels, st)
+    drawSideList(f, outArea, " Outlines ", labels, st, focused = app.focus == fpOutlines)
     app.outlineState = st
 
   # Center editor
@@ -498,11 +591,14 @@ proc draw*(app: var App, f: var Frame) =
     if app.cfg.keymap == kmVim:
       (if app.editorMode == emNormal: " NORMAL" else: " INSERT")
     else: ""
-  let bottomBlk = initBlock(
+  var bottomBlk = initBlock(
     title = " AI/" & agentTag & busyTag & modeHint & "  [" & formatGain(app.ai.stats) &
       " | " & $app.lastFrameMs.int & "ms] ",
     borders = AllBorders,
   )
+  if app.focus == fpAi:
+    bottomBlk.borderStyle = tnFg(Tn.cyan, {mBold})
+    bottomBlk.titleStyle = tnFg(Tn.cyan, {mBold})
   f.renderWidget(bottomBlk, layout.bottom)
   let bInner = bottomBlk.inner(layout.bottom)
   if not bInner.isEmpty:
@@ -510,9 +606,7 @@ proc draw*(app: var App, f: var Frame) =
     let msgRows = max(1, bInner.height.int - promptRow)
     let lines = visibleTranscript(app.ai, msgRows)
     for i, line in lines:
-      let clipped =
-        if line.len > bInner.width.int: line[0 ..< bInner.width.int]
-        else: line
+      let clipped = clipToDisplayWidth(line, bInner.width.int)
       discard f.buf[].setStringN(
         bInner.left, bInner.top + i, clipped, tnFg(Tn.fg), bInner.width.int
       )
@@ -522,12 +616,13 @@ proc draw*(app: var App, f: var Frame) =
       else:
         let st =
           if epochTime() < app.statusUntil: app.statusMsg
-          else: "Ctrl-Q quit │ :help │ Tab focus │ :audio"
+          else: "Shift-Tab panels │ Esc editor │ Ctrl-W close │ :help"
         st
     if bInner.height.int > 0:
       let py = bInner.top + bInner.height.int - 1
       discard f.buf[].setStringN(
-        bInner.left, py, prompt, tnFg(Tn.cyan), bInner.width.int
+        bInner.left, py, clipToDisplayWidth(prompt, bInner.width.int),
+        tnFg(Tn.cyan), bInner.width.int
       )
 
   app.drawContextMenu(f)
@@ -535,11 +630,56 @@ proc draw*(app: var App, f: var Frame) =
   app.lastFrameMs = (cpuTime() - t0) * 1000
 
 proc ensureCursorVisible(app: var App, areaH: int) =
-  let row = app.tabs.current.cursor.row
-  if row < app.scrollY:
-    app.scrollY = row
-  elif row >= app.scrollY + areaH:
-    app.scrollY = row - areaH + 1
+  let visual = app.buildEditorVisual()
+  if visual.len == 0:
+    app.scrollY = 0
+    return
+  let doc = app.tabs.current
+  let vi = visualIndexAt(visual, doc.cursor.row, doc.cursor.col)
+  if vi < app.scrollY:
+    app.scrollY = vi
+  elif vi >= app.scrollY + areaH:
+    app.scrollY = vi - areaH + 1
+
+proc moveVisualLine(app: var App, delta: int, selecting: bool) =
+  var doc = app.tabs.current
+  if selecting and not doc.selection.active:
+    doc.beginSelection()
+  elif not selecting:
+    doc.clearSelection()
+  let visual = app.buildEditorVisual()
+  if visual.len == 0:
+    return
+  var vi = visualIndexAt(visual, doc.cursor.row, doc.cursor.col)
+  vi = clamp(vi + delta, 0, visual.high)
+  let vr = visual[vi]
+  let line = doc.lines[vr.srcLine]
+  let startDisp = displayColAtByte(line, vr.startByte)
+  let endDisp = displayColAtByte(line, vr.endByte)
+  let want =
+    if endDisp > startDisp: clamp(app.preferredCol, startDisp, endDisp - 1)
+    else: startDisp
+  doc.cursor = doc.clampCursor(Cursor(row: vr.srcLine, col: byteAtDisplayCol(line, want)))
+  if selecting:
+    doc.updateSelectionHead()
+  app.tabs.docs[app.tabs.active] = doc
+  app.ensureCursorVisible(app.editorViewHeight())
+
+proc moveCursor(app: var App, drow, dcol: int, selecting: bool) =
+  if drow != 0 and dcol == 0:
+    app.moveVisualLine(drow, selecting)
+    return
+  var doc = app.tabs.current
+  if selecting and not doc.selection.active:
+    doc.beginSelection()
+  elif not selecting:
+    doc.clearSelection()
+  doc.cursor = doc.clampCursor(Cursor(row: doc.cursor.row + drow, col: doc.cursor.col + dcol))
+  if selecting:
+    doc.updateSelectionHead()
+  app.tabs.docs[app.tabs.active] = doc
+  app.updatePreferredCol()
+  app.ensureCursorVisible(app.editorViewHeight())
 
 proc handleAiCommand(app: var App, cmd: string) =
   let parts = strutils.splitWhitespace(cmd)
@@ -745,23 +885,11 @@ proc runCommand(app: var App, line: string) =
       app.setStatus(r.message)
     if r.quit:
       app.quit = true
+    app.ensureFocusVisible()
     app.refreshOutlines()
     saveConfig(app.cfg)
   else:
     app.setStatus(r.message)
-
-proc moveCursor(app: var App, drow, dcol: int, selecting: bool) =
-  var doc = app.tabs.current
-  if selecting and not doc.selection.active:
-    doc.beginSelection()
-  elif not selecting:
-    doc.clearSelection()
-  doc.cursor = doc.clampCursor(Cursor(row: doc.cursor.row + drow, col: doc.cursor.col + dcol))
-  if selecting:
-    doc.updateSelectionHead()
-  app.tabs.docs[app.tabs.active] = doc
-  let h = max(1, app.panelRects.center.height.int - 2)
-  app.ensureCursorVisible(h)
 
 proc handleVimNormal(app: var App, key: KeyEvent): bool =
   ## Returns true if the key was handled in normal mode.
@@ -874,29 +1002,35 @@ proc handleEditorKey(app: var App, key: KeyEvent) =
     doc.cursor.col = 0
     if selecting: doc.updateSelectionHead() else: doc.clearSelection()
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
   of kcEnd:
     doc.cursor.col = doc.lines[doc.cursor.row].len
     if selecting: doc.updateSelectionHead() else: doc.clearSelection()
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
   of kcPageUp:
-    app.moveCursor(-(app.panelRects.center.height.int), 0, selecting)
+    app.moveCursor(-(app.editorViewHeight()), 0, selecting)
   of kcPageDown:
-    app.moveCursor(app.panelRects.center.height.int, 0, selecting)
+    app.moveCursor(app.editorViewHeight(), 0, selecting)
   of kcBackspace:
     doc.backspace()
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
     app.refreshOutlines()
   of kcDelete:
     doc.deleteForward()
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
     app.refreshOutlines()
   of kcEnter:
     doc.newline()
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
     app.refreshOutlines()
   of kcTab:
     doc.insertText("  ")
     app.tabs.docs[app.tabs.active] = doc
+    app.updatePreferredCol()
   of kcChar:
     if kmCtrl in key.mods:
       let ch = key.rune.toUTF8.toLowerAscii
@@ -948,6 +1082,7 @@ proc handleEditorKey(app: var App, key: KeyEvent) =
         doc.deleteSelection()
       doc.insertText(key.rune.toUTF8)
       app.tabs.docs[app.tabs.active] = doc
+      app.updatePreferredCol()
       app.refreshOutlines()
   else:
     discard
@@ -989,7 +1124,9 @@ proc applyMenuAction(app: var App, action: MenuAction) =
     app.menu.close()
 
 proc handleMouse(app: var App, m: MouseEvent) =
-  if app.confirmClose and m.kind == mkDown:
+  if app.confirmClose:
+    if m.kind != mkDown or m.button != mbLeft:
+      return
     if app.confirmArea.contains(m.col, m.row):
       let innerTop = app.confirmArea.top + 1
       let opt = m.row - innerTop - 1 # skip message row
@@ -997,19 +1134,22 @@ proc handleMouse(app: var App, m: MouseEvent) =
         app.confirmSelected = opt
         app.applyConfirmClose()
       return
-    else:
-      app.cancelConfirmClose()
-      return
+    app.cancelConfirmClose()
+    return
 
-  if app.menu.visible and m.kind == mkDown:
+  if app.menu.visible:
+    if m.kind != mkDown or m.button != mbLeft:
+      return
     let hit = app.menu.hitTest(m.col, m.row)
     if hit.isSome:
       app.applyMenuAction(hit.get)
-      return
     else:
       app.menu.close()
+    return
 
   if m.kind == mkDown and m.button == mbRight:
+    if app.overlayOpen:
+      return
     let tabIdx = app.tabIndexAt(m.col, m.row)
     if tabIdx >= 0:
       app.menu.openTabMenu(m.col, m.row, tabIdx)
@@ -1041,6 +1181,7 @@ proc handleMouse(app: var App, m: MouseEvent) =
   # File tree
   let tree = app.fileTreeArea()
   if tree.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
+    app.focus = fpFileTree
     let innerY = m.row - tree.top - 1
     let idx = app.fileState.offset + innerY
     if idx == 0:
@@ -1058,11 +1199,13 @@ proc handleMouse(app: var App, m: MouseEvent) =
         app.refreshFileTree()
       else:
         app.openPath(e.path)
+        app.focus = fpEditor
     return
 
   # Outlines
   let oa = app.outlinesArea()
   if not oa.isEmpty and oa.contains(m.col, m.row) and m.kind == mkDown:
+    app.focus = fpOutlines
     let innerY = m.row - oa.top - 1
     let idx = app.outlineState.offset + innerY
     if idx >= 0 and idx < app.outlineItems.len:
@@ -1074,30 +1217,52 @@ proc handleMouse(app: var App, m: MouseEvent) =
       app.focus = fpEditor
     return
 
+  # AI / bottom panel
+  if app.panelRects.bottom.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
+    app.focus = fpAi
+    return
+
   # Editor mouse
   let ed = app.panelRects.center
   if ed.contains(m.col, m.row):
     let inner = rect(ed.left + 1, ed.top + 1, max(0, ed.width.int - 2), max(0, ed.height.int - 2))
     if inner.contains(m.col, m.row):
-      let row = app.scrollY + (m.row - inner.top)
-      let col = app.scrollX + (m.col - inner.left)
+      let visIdx = app.scrollY + (m.row - inner.top)
+      let visualCol = m.col - inner.left
       var doc = app.tabs.current
+      let visual = app.buildEditorVisual()
+      var row = doc.cursor.row
+      var col = doc.cursor.col
+      if visIdx >= 0 and visIdx <= visual.high:
+        let vr = visual[visIdx]
+        row = vr.srcLine
+        let line = doc.lines[row]
+        let origin =
+          if vr.hard: displayColAtByte(line, floorRuneIndex(line, app.scrollX))
+          else: displayColAtByte(line, vr.startByte)
+        col = byteAtDisplayCol(line, origin + visualCol)
+        if not vr.hard:
+          col = clamp(col, vr.startByte, max(vr.startByte, vr.endByte))
       if m.kind == mkDown and m.button == mbLeft:
         doc.setCursor(Cursor(row: row, col: col))
         doc.beginSelection()
         app.mouseSelecting = true
         app.tabs.docs[app.tabs.active] = doc
+        app.updatePreferredCol()
         app.focus = fpEditor
       elif (m.kind == mkDown or m.kind == mkDrag) and app.mouseSelecting:
         doc.cursor = doc.clampCursor(Cursor(row: row, col: col))
         doc.updateSelectionHead()
         app.tabs.docs[app.tabs.active] = doc
+        app.updatePreferredCol()
       elif m.kind == mkUp:
         app.mouseSelecting = false
       elif m.kind == mkScrollUp:
         app.scrollY = max(0, app.scrollY - 3)
       elif m.kind == mkScrollDown:
-        app.scrollY += 3
+        let visual = app.buildEditorVisual()
+        let maxScroll = max(0, visual.len - app.editorViewHeight())
+        app.scrollY = min(maxScroll, app.scrollY + 3)
 
 proc activateFileTreeSelection(app: var App) =
   let idx = app.fileState.selected.get(0)
@@ -1127,8 +1292,20 @@ proc handleSideKey(app: var App, key: KeyEvent) =
     of kcDown:
       let cur = app.fileState.selected.get(0)
       app.fileState.select(min(maxIdx, cur + 1))
+    of kcHome:
+      app.fileState.select(0)
+    of kcEnd:
+      app.fileState.select(maxIdx)
+    of kcPageUp:
+      let cur = app.fileState.selected.get(0)
+      app.fileState.select(max(0, cur - 10))
+    of kcPageDown:
+      let cur = app.fileState.selected.get(0)
+      app.fileState.select(min(maxIdx, cur + 10))
     of kcEnter:
       app.activateFileTreeSelection()
+    of kcEsc:
+      app.focus = fpEditor
     else:
       discard
   of fpOutlines:
@@ -1140,14 +1317,28 @@ proc handleSideKey(app: var App, key: KeyEvent) =
     of kcDown:
       let cur = app.outlineState.selected.get(0)
       app.outlineState.select(min(app.outlineItems.high, cur + 1))
+    of kcHome:
+      app.outlineState.select(0)
+    of kcEnd:
+      app.outlineState.select(app.outlineItems.high)
+    of kcPageUp:
+      let cur = app.outlineState.selected.get(0)
+      app.outlineState.select(max(0, cur - 10))
+    of kcPageDown:
+      let cur = app.outlineState.selected.get(0)
+      app.outlineState.select(min(app.outlineItems.high, cur + 10))
     of kcEnter:
       let idx = app.outlineState.selected.get(0)
       if idx >= 0 and idx < app.outlineItems.len:
         var doc = app.tabs.current
         doc.setCursor(Cursor(row: app.outlineItems[idx].line, col: 0))
         app.tabs.docs[app.tabs.active] = doc
-        app.scrollY = max(0, app.outlineItems[idx].line - 2)
+        app.updatePreferredCol()
+        let visual = app.buildEditorVisual()
+        app.scrollY = max(0, visualIndexAt(visual, doc.cursor.row, 0) - 2)
         app.focus = fpEditor
+    of kcEsc:
+      app.focus = fpEditor
     else:
       discard
   else:
@@ -1160,10 +1351,6 @@ proc handleEvent*(app: var App, ev: Event) =
     if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "q":
       app.quit = true
       return
-    if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "w":
-      if not app.confirmClose:
-        app.requestCloseTab(app.tabs.active)
-      return
     if app.confirmClose:
       case key.code
       of kcEsc:
@@ -1172,6 +1359,10 @@ proc handleEvent*(app: var App, ev: Event) =
         app.confirmSelected = max(0, app.confirmSelected - 1)
       of kcRight, kcDown, kcTab:
         app.confirmSelected = min(2, app.confirmSelected + 1)
+      of kcHome:
+        app.confirmSelected = 0
+      of kcEnd:
+        app.confirmSelected = 2
       of kcEnter:
         app.applyConfirmClose()
       of kcChar:
@@ -1187,9 +1378,6 @@ proc handleEvent*(app: var App, ev: Event) =
       else:
         discard
       return
-    if app.ai.busy and key.code == kcEsc:
-      app.ai.requestCancel()
-      return
     if app.menu.visible:
       case key.code
       of kcEsc:
@@ -1198,10 +1386,20 @@ proc handleEvent*(app: var App, ev: Event) =
         app.menu.selected = max(0, app.menu.selected - 1)
       of kcDown:
         app.menu.selected = min(app.menu.items.high, app.menu.selected + 1)
+      of kcHome:
+        app.menu.selected = 0
+      of kcEnd:
+        app.menu.selected = app.menu.items.high
       of kcEnter:
         app.applyMenuAction(app.menu.actionAt(app.menu.selected))
       else:
         discard
+      return
+    if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "w":
+      app.requestCloseTab(app.tabs.active)
+      return
+    if app.ai.busy and key.code == kcEsc:
+      app.ai.requestCancel()
       return
     if app.commandMode:
       case key.code
@@ -1222,7 +1420,11 @@ proc handleEvent*(app: var App, ev: Event) =
       else:
         discard
       return
-    if app.focus == fpAi and not app.commandMode:
+    # Panel focus cycle (Shift-Tab only — Tab stays available for editor indent)
+    if key.code == kcBackTab or (key.code == kcTab and kmShift in key.mods):
+      app.cycleFocus(1)
+      return
+    if app.focus == fpAi:
       case key.code
       of kcEsc:
         if app.ai.busy:
@@ -1253,13 +1455,6 @@ proc handleEvent*(app: var App, ev: Event) =
         (app.cfg.keymap != kmVim or app.editorMode == emNormal):
       app.commandMode = true
       app.commandLine = ""
-      return
-    if key.code == kcTab and kmCtrl notin key.mods:
-      case app.focus
-      of fpEditor: app.focus = fpFileTree
-      of fpFileTree: app.focus = fpOutlines
-      of fpOutlines: app.focus = fpAi
-      of fpAi, fpCommand: app.focus = fpEditor
       return
     if app.focus in {fpFileTree, fpOutlines}:
       app.handleSideKey(key)

@@ -1,6 +1,6 @@
 ## YouTube / podcast-style audio via mpv + yt-dlp.
 
-import std/[os, osproc, strutils, json, net]
+import std/[os, osproc, json, net]
 
 type
   AudioState* = enum

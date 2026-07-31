@@ -1,6 +1,6 @@
 ## Git wrappers for :git commands.
 
-import std/[os, osproc, strutils]
+import std/[os, osproc]
 
 type
   GitResult* = object
