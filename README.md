@@ -5,7 +5,7 @@
 Tai is a TUI text editor with an embedded AI coding harness — files, buffer, outline, and agent in one screen. Built in [Nim](https://nim-lang.org) on [TATUÍ](https://github.com/invector-tecnologia/tatui).
 
 ```
-┌─ TAI EDITOR (ASCII) ── v0.1.0 ── [▶][⏭] podcast ────────┐
+┌─ TAI EDITOR (ASCII) ── v0.5.0 ── [▶][⏭] podcast ────────┐
 │ developed by Bernardo Rosmaninho - www.invector.com.br │
 ├─ tabs ─────────────────────────────────────────────────┤
 │ Files │           editor / preview           │ Outline │
@@ -71,9 +71,9 @@ Or inside Tai: `:login <token>` then `:provider openai|anthropic|ollama` and `:m
 | Panel | What it does |
 |-------|----------------|
 | **Header** | ASCII **TAI EDITOR**, credit, version, audio controls |
-| **Tabs** | Open buffers; click or `Ctrl-N` / `Ctrl-P` to cycle |
+| **Tabs** | Open buffers; click or `Ctrl-N` / `Ctrl-P` to cycle; right-click to duplicate/close |
 | **Files** | Tree; click or focus + arrows + Enter |
-| **Editor** | Edit with mouse and keyboard; right-click menu |
+| **Editor** | Edit with mouse and keyboard; right-click Edit menu |
 | **Outlines** | Jump to symbols / headings |
 | **AI** (bottom) | Transcript + `ai>` prompt or `:` command line |
 
@@ -92,10 +92,19 @@ Swap file tree: `:set file_tree left|right`.
 | `Ctrl-S` | Save |
 | `Ctrl-Z` / `Ctrl-Y` | Undo / redo |
 | `Ctrl-C` `X` `V` `A` | Copy / cut / paste / select all |
-| `Ctrl-W` | Close tab |
+| `Ctrl-W` | Close active tab (prompts if unsaved) |
 | `Ctrl-N` / `Ctrl-P` | Next / previous tab |
 | `Ctrl-Q` | Quit |
-| Mouse | Click, drag-select, scroll, right-click menu |
+| Mouse | Click, drag-select, scroll; right-click Edit menu in the editor |
+
+### Tabs
+
+| Action | How |
+|--------|-----|
+| Switch | Click the tab, or `Ctrl-N` / `Ctrl-P` |
+| Duplicate | Right-click tab → **Duplicar** — opens `copy-<name>` with the same buffer |
+| Close | Right-click tab → **Fechar**, or `Ctrl-W` on the active tab |
+| Unsaved close | Overlay asks **Salvar** / **Não salvar** / **Cancelar**. Docs without a path save under the folder open in the Files panel |
 
 ### Colon commands
 
@@ -237,6 +246,8 @@ License: **AGPL-3.0** (aligned with TATUÍ packaging until upstream clarifies MI
 ## Roadmap
 
 Shipped in **v0.4.0**: streaming · plan/ask/agent · `:git` · MCP stdio · skills/hooks · multi-theme · OAuth device-code · Vim modal · tree-sitter auto-fallback
+
+Shipped in **v0.5.0**: tab context menu (duplicate/close) · `Ctrl-W` close with save confirm overlay
 
 Later: MCP HTTP/SSE · native tree-sitter spans · GitHub PR · fuller Vim
 

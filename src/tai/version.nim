@@ -1,3 +1,3 @@
 ## Tai version (keep in sync with tai.nimble).
 
-const TaiVersion* = "0.4.0"
+const TaiVersion* = "0.5.0"

@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.4.0"
+version       = "0.5.0"
 author        = "Invector Tecnologia"
 description   = "Tai — TUI text editor with AI agent harness"
 license       = "AGPL-3.0"

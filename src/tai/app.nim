@@ -63,6 +63,10 @@ type
     editorMode*: EditorMode
     vimPending*: string ## multi-key (dd, gg, yy)
     yankBuffer*: string
+    confirmClose*: bool
+    confirmTab*: int
+    confirmSelected*: int ## 0=Salvar, 1=Não salvar, 2=Cancelar
+    confirmArea*: Rect
 
 proc setStatus*(app: var App, msg: string, secs = 3.0) =
   app.statusMsg = msg
@@ -192,10 +196,119 @@ proc outlinesArea(app: App): Rect =
   if app.cfg.fileTreeSide == ftsLeft: app.panelRects.right
   else: app.panelRects.left
 
+proc tabIndexAt(app: App, col, row: int): int =
+  if not app.panelRects.tabs.contains(col, row):
+    return -1
+  let titles = app.tabs.titles()
+  var x = app.panelRects.tabs.left
+  for i, t in titles:
+    let w = t.len + 3
+    if col >= x and col < x + w:
+      return i
+    x += w
+  -1
+
+proc docDisplayBase(d: Document): string =
+  if d.path.len == 0: "[scratch]"
+  else: d.path.extractFilename
+
+proc resolveSavePath(app: App, doc: var Document) =
+  ## Absolute path kept; empty/relative resolved under the file-tree cwd.
+  if doc.path.len == 0:
+    doc.path = app.cwd / "scratch"
+  elif not isAbsolute(doc.path):
+    doc.path = app.cwd / doc.path.extractFilename
+
+proc performCloseTab(app: var App, index: int) =
+  discard app.tabs.closeTab(index)
+  app.scrollY = 0
+  app.refreshOutlines()
+
+proc requestCloseTab*(app: var App, index: int) =
+  if index < 0 or index >= app.tabs.docs.len:
+    return
+  if not app.tabs.docs[index].dirty:
+    app.performCloseTab(index)
+    return
+  app.confirmClose = true
+  app.confirmTab = index
+  app.confirmSelected = 0
+
+proc cancelConfirmClose(app: var App) =
+  app.confirmClose = false
+  app.confirmTab = -1
+  app.confirmSelected = 0
+
+proc applyConfirmClose(app: var App) =
+  if not app.confirmClose:
+    return
+  let idx = app.confirmTab
+  case app.confirmSelected
+  of 0: # Salvar
+    if idx < 0 or idx >= app.tabs.docs.len:
+      app.cancelConfirmClose()
+      return
+    var doc = app.tabs.docs[idx]
+    app.resolveSavePath(doc)
+    let (ok, err) = saveFile(doc)
+    app.tabs.docs[idx] = doc
+    if ok:
+      app.watcher.watch(doc.path)
+      app.cancelConfirmClose()
+      app.performCloseTab(idx)
+      app.setStatus("saved")
+      app.refreshFileTree()
+    else:
+      app.setStatus(err)
+  of 1: # Não salvar
+    app.cancelConfirmClose()
+    app.performCloseTab(idx)
+  else: # Cancelar
+    app.cancelConfirmClose()
+
+proc drawConfirmClose(app: var App, f: var Frame) =
+  if not app.confirmClose:
+    return
+  let name =
+    if app.confirmTab >= 0 and app.confirmTab < app.tabs.docs.len:
+      docDisplayBase(app.tabs.docs[app.confirmTab])
+    else: "?"
+  let msg = "Salvar alterações em " & name & "?"
+  const options = ["Salvar", "Não salvar", "Cancelar"]
+  var maxW = msg.len
+  for o in options:
+    maxW = max(maxW, o.len)
+  let w = maxW + 4
+  let h = 1 + options.len # message + options
+  var x = max(0, (f.area.width.int - w) div 2)
+  var y = max(0, (f.area.height.int - h) div 2)
+  if x + w > f.area.right: x = max(0, f.area.right - w)
+  if y + h > f.area.bottom: y = max(0, f.area.bottom - h)
+  let area = rect(x, y, w, h)
+  app.confirmArea = area
+  let blk = initBlock(borders = AllBorders, title = " Fechar ", borderType = btRounded)
+  f.renderWidget(blk, area)
+  let inner = blk.inner(area)
+  if inner.isEmpty:
+    return
+  discard f.buf[].setStringN(inner.left, inner.top, " " & msg, tnFg(Tn.fg), inner.width.int)
+  for i, opt in options:
+    let st =
+      if i == app.confirmSelected:
+        tnHl(Tn.black, Tn.cyan, {mBold})
+      else:
+        tnFg(Tn.fg)
+    let row = inner.top + 1 + i
+    if row < inner.bottom:
+      discard f.buf[].setStringN(inner.left, row, " " & opt, st, inner.width.int)
+
 proc drawContextMenu(app: var App, f: var Frame) =
   if not app.menu.visible:
     return
-  let w = 16
+  var maxLabel = 0
+  for item in app.menu.items:
+    maxLabel = max(maxLabel, item.label.len)
+  let w = max(16, maxLabel + 4)
   let h = app.menu.items.len
   var x = app.menu.x
   var y = app.menu.y
@@ -203,7 +316,8 @@ proc drawContextMenu(app: var App, f: var Frame) =
   if y + h > f.area.bottom: y = max(0, f.area.bottom - h)
   let area = rect(x, y, w, h)
   app.menu.area = area
-  let blk = initBlock(borders = AllBorders, title = " Edit ", borderType = btRounded)
+  let title = if app.menu.isTabMenu: " Tab " else: " Edit "
+  let blk = initBlock(borders = AllBorders, title = title, borderType = btRounded)
   f.renderWidget(blk, area)
   let inner = blk.inner(area)
   for i, item in app.menu.items:
@@ -417,6 +531,7 @@ proc draw*(app: var App, f: var Frame) =
       )
 
   app.drawContextMenu(f)
+  app.drawConfirmClose(f)
   app.lastFrameMs = (cpuTime() - t0) * 1000
 
 proc ensureCursorVisible(app: var App, areaH: int) =
@@ -816,8 +931,6 @@ proc handleEditorKey(app: var App, key: KeyEvent) =
         let (ok, err) = saveFile(doc)
         app.tabs.docs[app.tabs.active] = doc
         app.setStatus(if ok: "saved" else: err)
-      of "w":
-        discard app.tabs.closeActive()
       of "q":
         app.quit = true
       of "n":
@@ -840,31 +953,54 @@ proc handleEditorKey(app: var App, key: KeyEvent) =
     discard
 
 proc applyMenuAction(app: var App, action: MenuAction) =
-  var doc = app.tabs.current
   case action
-  of maCopy:
-    let t = if doc.selection.active: doc.selectedText() else: ""
-    if t.len > 0: discard copyToClipboard(t)
-  of maCut:
-    let t = if doc.selection.active: doc.selectedText() else: ""
-    if t.len > 0:
-      discard copyToClipboard(t)
+  of maDuplicate:
+    let idx = app.menu.targetTab
+    app.menu.close()
+    app.tabs.duplicateTab(idx)
+    app.refreshOutlines()
+  of maCloseTab:
+    let idx = app.menu.targetTab
+    app.menu.close()
+    app.requestCloseTab(idx)
+  of maCopy, maCut, maPaste, maDelete, maSelectAll, maNone:
+    var doc = app.tabs.current
+    case action
+    of maCopy:
+      let t = if doc.selection.active: doc.selectedText() else: ""
+      if t.len > 0: discard copyToClipboard(t)
+    of maCut:
+      let t = if doc.selection.active: doc.selectedText() else: ""
+      if t.len > 0:
+        discard copyToClipboard(t)
+        doc.deleteSelection()
+    of maPaste:
+      let t = pasteFromClipboard()
+      if t.len > 0:
+        if doc.selection.active: doc.deleteSelection()
+        doc.insertText(t)
+    of maDelete:
       doc.deleteSelection()
-  of maPaste:
-    let t = pasteFromClipboard()
-    if t.len > 0:
-      if doc.selection.active: doc.deleteSelection()
-      doc.insertText(t)
-  of maDelete:
-    doc.deleteSelection()
-  of maSelectAll:
-    doc.selectAll()
-  of maNone:
-    discard
-  app.tabs.docs[app.tabs.active] = doc
-  app.menu.close()
+    of maSelectAll:
+      doc.selectAll()
+    else:
+      discard
+    app.tabs.docs[app.tabs.active] = doc
+    app.menu.close()
 
 proc handleMouse(app: var App, m: MouseEvent) =
+  if app.confirmClose and m.kind == mkDown:
+    if app.confirmArea.contains(m.col, m.row):
+      let innerTop = app.confirmArea.top + 1
+      let opt = m.row - innerTop - 1 # skip message row
+      if opt >= 0 and opt <= 2:
+        app.confirmSelected = opt
+        app.applyConfirmClose()
+      return
+    else:
+      app.cancelConfirmClose()
+      return
+
   if app.menu.visible and m.kind == mkDown:
     let hit = app.menu.hitTest(m.col, m.row)
     if hit.isSome:
@@ -874,7 +1010,11 @@ proc handleMouse(app: var App, m: MouseEvent) =
       app.menu.close()
 
   if m.kind == mkDown and m.button == mbRight:
-    app.menu.openAt(m.col, m.row)
+    let tabIdx = app.tabIndexAt(m.col, m.row)
+    if tabIdx >= 0:
+      app.menu.openTabMenu(m.col, m.row, tabIdx)
+    else:
+      app.menu.openEditorMenu(m.col, m.row)
     return
 
   # Header audio buttons
@@ -891,16 +1031,12 @@ proc handleMouse(app: var App, m: MouseEvent) =
       return
 
   # Tab bar clicks
-  if app.panelRects.tabs.contains(m.col, m.row) and m.kind == mkDown and m.button == mbLeft:
-    let titles = app.tabs.titles()
-    var x = app.panelRects.tabs.left
-    for i, t in titles:
-      let w = t.len + 3
-      if m.col >= x and m.col < x + w:
-        app.tabs.selectTab(i)
-        app.refreshOutlines()
-        return
-      x += w
+  if m.kind == mkDown and m.button == mbLeft:
+    let tabIdx = app.tabIndexAt(m.col, m.row)
+    if tabIdx >= 0:
+      app.tabs.selectTab(tabIdx)
+      app.refreshOutlines()
+      return
 
   # File tree
   let tree = app.fileTreeArea()
@@ -1023,6 +1159,33 @@ proc handleEvent*(app: var App, ev: Event) =
     let key = ev.key
     if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "q":
       app.quit = true
+      return
+    if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "w":
+      if not app.confirmClose:
+        app.requestCloseTab(app.tabs.active)
+      return
+    if app.confirmClose:
+      case key.code
+      of kcEsc:
+        app.cancelConfirmClose()
+      of kcLeft, kcUp:
+        app.confirmSelected = max(0, app.confirmSelected - 1)
+      of kcRight, kcDown, kcTab:
+        app.confirmSelected = min(2, app.confirmSelected + 1)
+      of kcEnter:
+        app.applyConfirmClose()
+      of kcChar:
+        let ch = key.rune.toUTF8.toLowerAscii
+        if ch == "s":
+          app.confirmSelected = 0
+          app.applyConfirmClose()
+        elif ch == "n":
+          app.confirmSelected = 1
+          app.applyConfirmClose()
+        elif ch == "c":
+          app.cancelConfirmClose()
+      else:
+        discard
       return
     if app.ai.busy and key.code == kcEsc:
       app.ai.requestCancel()

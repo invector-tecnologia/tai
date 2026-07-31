@@ -1,5 +1,6 @@
 import std/[os, strutils, options]
 import ../src/tai/buffer/document
+import ../src/tai/buffer/tabs
 import ../src/tai/commands/dispatch
 import ../src/tai/config
 import ../src/tai/highlight/engine
@@ -23,6 +24,25 @@ proc testDocument() =
   d.deleteSelection()
   doAssert d.lines == @[""]
   echo "testDocument ok"
+
+proc testTabs() =
+  var tm = initTabManager()
+  tm.openDoc(fromText("one", "/tmp/a.txt"))
+  tm.openDoc(fromText("two", "/tmp/b.txt"))
+  doAssert tm.docs.len == 2
+  tm.duplicateTab(0)
+  doAssert tm.docs.len == 3
+  doAssert tm.active == 1
+  doAssert tm.docs[1].path == "copy-a.txt"
+  doAssert tm.docs[1].dirty
+  doAssert tm.docs[1].lines == @["one"]
+  doAssert tm.closeTab(1)
+  doAssert tm.docs.len == 2
+  discard tm.closeTab(0)
+  discard tm.closeTab(0)
+  doAssert tm.docs.len == 1
+  doAssert tm.docs[0].path.len == 0
+  echo "testTabs ok"
 
 proc testCommands() =
   let prev = getCurrentDir()
@@ -122,6 +142,7 @@ proc testLayoutSmoke() =
 
 when isMainModule:
   testDocument()
+  testTabs()
   testCommands()
   testHighlight()
   testOutlinePreview()

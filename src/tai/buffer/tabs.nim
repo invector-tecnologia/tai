@@ -1,5 +1,6 @@
 ## Tab manager for multiple open documents.
 
+import std/os
 import ./document
 
 type
@@ -36,16 +37,37 @@ proc openDoc*(tm: var TabManager, doc: Document) =
     tm.docs.add doc
     tm.active = tm.docs.high
 
-proc closeActive*(tm: var TabManager): bool =
+proc closeTab*(tm: var TabManager, index: int): bool =
   ## Returns false if last tab was closed and replaced with scratch.
+  if index < 0 or index >= tm.docs.len:
+    return true
   if tm.docs.len <= 1:
     tm.docs[0] = emptyDocument()
     tm.active = 0
     return false
-  tm.docs.delete(tm.active)
-  if tm.active >= tm.docs.len:
+  tm.docs.delete(index)
+  if tm.active > index:
+    dec tm.active
+  elif tm.active >= tm.docs.len:
     tm.active = tm.docs.high
   true
+
+proc closeActive*(tm: var TabManager): bool =
+  tm.closeTab(tm.active)
+
+proc duplicateTab*(tm: var TabManager, index: int) =
+  if index < 0 or index >= tm.docs.len:
+    return
+  let src = tm.docs[index]
+  let base =
+    if src.path.len == 0: "scratch"
+    else: src.path.extractFilename
+  var copy = src
+  copy.path = "copy-" & base
+  copy.dirty = true
+  let insertAt = index + 1
+  tm.docs.insert(copy, insertAt)
+  tm.active = insertAt
 
 proc selectTab*(tm: var TabManager, i: int) =
   if i >= 0 and i < tm.docs.len:

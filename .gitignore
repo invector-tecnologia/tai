@@ -11,3 +11,6 @@ htmldocs/
 *.db-journal
 tests/all_tests
 /tests/all_tests
+nimble.develop
+nimble.paths
+nimbledeps
