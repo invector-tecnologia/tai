@@ -11,6 +11,9 @@ type
     message*: string
     quit*: bool
     redraw*: bool
+    newCwd*: string       ## non-empty → app should refresh file tree
+    openPath*: string     ## non-empty → app should open via openPath
+    aiCmd*: string        ## non-empty → AI command payload (without prefix)
 
   CommandContext* = object
     cfg*: ptr Config
@@ -56,24 +59,24 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
   of "e", "edit", "open":
     if args.len == 0:
       return errResult("usage: :e <path>")
-    let path = args[0].expandTilde.absolutePath
-    let loaded = loadFile(path)
-    if not loaded.ok:
-      # create new file buffer
-      ctx.doc[] = emptyDocument(path)
-      return okResult("new: " & path)
-    ctx.doc[] = loaded.doc
-    return okResult("opened: " & path & " (" & $loaded.doc.bytesLoaded & " bytes)")
-  of "hide":
-    if args.len > 0 and args[0].toLowerAscii == "outlines":
-      ctx.cfg[].outlinesVisible = false
-      return okResult("outlines hidden")
-    return errResult("usage: :hide outlines")
-  of "show":
-    if args.len > 0 and args[0].toLowerAscii == "outlines":
-      ctx.cfg[].outlinesVisible = true
-      return okResult("outlines shown")
-    return errResult("usage: :show outlines")
+    var r = okResult("open")
+    r.openPath = args[0].expandTilde.absolutePath
+    return r
+  of "hide", "show":
+    const panelItems = "outlines, files"
+    if args.len == 0:
+      return okResult("select: " & panelItems & "  (e.g. :" & head & " outlines)")
+    let visible = head == "show"
+    let item = args[0].toLowerAscii
+    case item
+    of "outlines", "outline":
+      ctx.cfg[].outlinesVisible = visible
+      return okResult(if visible: "outlines shown" else: "outlines hidden")
+    of "arquivos", "arquivo", "files", "file":
+      ctx.cfg[].filesVisible = visible
+      return okResult(if visible: "files shown" else: "files hidden")
+    else:
+      return errResult("invalid item — select: " & panelItems)
   of "preview":
     ctx.cfg[].previewMode = true
     ctx.doc[].previewMode = true
@@ -95,16 +98,6 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
         return okResult("file tree: right")
       else:
         return errResult("expected left|right")
-    if args[0] == "keymap":
-      case args[1].toLowerAscii
-      of "helix":
-        ctx.cfg[].keymap = kmHelix
-        return okResult("keymap: helix")
-      of "vim":
-        ctx.cfg[].keymap = kmVim
-        return okResult("keymap: vim")
-      else:
-        return errResult("expected helix|vim")
     return errResult("unknown setting")
   of "cd":
     if args.len == 0:
@@ -114,11 +107,17 @@ proc dispatchCommand*(ctx: var CommandContext, raw: string): CommandResult =
       return errResult("not a directory")
     ctx.cfg[].workspace = p
     setCurrentDir(p)
-    return okResult("cwd: " & p)
+    var r = okResult("cwd: " & p)
+    r.newCwd = p
+    return r
   of "help":
-    return okResult(":q :w :wq :e :hide outlines :show outlines :preview :source :set file_tree left|right :ai :login :provider :rag")
+    return okResult(
+      ":q :w :wq :e :hide/:show [outlines|files] :preview :source " &
+      ":set file_tree left|right :cd :ai :login :provider :model :rag :shell"
+    )
   else:
-    # AI-related commands handled by app layer via prefix
-    if head in ["ai", "login", "provider", "rag"]:
-      return CommandResult(ok: true, message: "AI_CMD:" & cmd, quit: false, redraw: true)
+    if head in ["ai", "login", "provider", "model", "rag", "shell", "clear"]:
+      var r = okResult("")
+      r.aiCmd = cmd
+      return r
     return errResult("unknown command: :" & head)

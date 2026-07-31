@@ -1,4 +1,4 @@
-## inotify-based file watcher (Linux). Polls for external modifications.
+## mtime-based file watcher. Polls watched paths for external modifications.
 
 import std/[os, tables, times]
 

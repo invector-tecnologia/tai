@@ -1,4 +1,4 @@
-## Token / prompt / semantic / context caches + simple embedding hash.
+## Token / prompt / response / context caches.
 
 import std/[os, strutils, tables, times, hashes, json, base64, options]
 
@@ -16,7 +16,8 @@ type
     summary*: string
     transcriptTail*: seq[string]
 
-  SemanticCache* = object
+  ## Exact-match response cache (hash of prompt). Not embedding-based.
+  ResponseCache* = object
     path*: string
     entries*: Table[string, CacheEntry]
 
@@ -26,14 +27,17 @@ type
     savedTokens*: int
     rtkSavedTokens*: int
 
+# Backward-compatible alias used by older call sites / tests.
+type SemanticCache* = ResponseCache
+
 proc initPromptCache*(): PromptCache =
   PromptCache(entries: initTable[string, CacheEntry]())
 
 proc initContextCache*(): ContextCache =
   ContextCache(transcriptTail: @[])
 
-proc initSemanticCache*(path: string): SemanticCache =
-  result = SemanticCache(path: path, entries: initTable[string, CacheEntry]())
+proc initResponseCache*(path: string): ResponseCache =
+  result = ResponseCache(path: path, entries: initTable[string, CacheEntry]())
   if fileExists(path):
     try:
       let j = parseJson(readFile(path))
@@ -42,7 +46,10 @@ proc initSemanticCache*(path: string): SemanticCache =
     except CatchableError:
       discard
 
-proc save*(c: SemanticCache) =
+proc initSemanticCache*(path: string): ResponseCache =
+  initResponseCache(path)
+
+proc save*(c: ResponseCache) =
   let parent = parentDir(c.path)
   if parent.len > 0:
     createDir(parent)
@@ -66,14 +73,14 @@ proc get*(c: var PromptCache, key: string): Option[string] =
 proc put*(c: var PromptCache, key, value: string) =
   c.entries[key] = CacheEntry(key: key, value: value, created: getTime(), hits: 0)
 
-proc get*(c: var SemanticCache, prompt: string): Option[string] =
+proc get*(c: var ResponseCache, prompt: string): Option[string] =
   let key = cacheKey(prompt)
   if c.entries.hasKey(key):
     inc c.entries[key].hits
     return some(c.entries[key].value)
   none(string)
 
-proc put*(c: var SemanticCache, prompt, response: string) =
+proc put*(c: var ResponseCache, prompt, response: string) =
   let key = cacheKey(prompt)
   c.entries[key] = CacheEntry(key: key, value: response, created: getTime(), hits: 0)
   c.save()
@@ -84,6 +91,10 @@ proc appendTurn*(c: var ContextCache, role, content: string) =
     let head = c.transcriptTail[0 ..< c.transcriptTail.len - 30]
     c.summary = "Earlier conversation (" & $head.len & " turns) compacted."
     c.transcriptTail = c.transcriptTail[^30 .. ^1]
+
+proc clear*(c: var ContextCache) =
+  c.summary = ""
+  c.transcriptTail = @[]
 
 proc contextBlock*(c: ContextCache): string =
   var parts: seq[string]

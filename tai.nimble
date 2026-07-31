@@ -14,10 +14,10 @@ requires "tatui >= 0.1.0"
 requires "parsetoml >= 0.7.0"
 
 task test, "Run the test suite":
-  exec "nim c -r --mm:orc --hints:off tests/all_tests.nim"
+  exec "nim c -r --mm:orc --threads:on --hints:off tests/all_tests.nim"
 
 task lint, "Type-check the project":
-  exec "nim check --mm:orc --hints:off src/tai.nim"
+  exec "nim check --mm:orc --threads:on --hints:off src/tai.nim"
 
 task run, "Build and run Tai in the current directory":
-  exec "nim c -r --mm:orc -d:release src/tai.nim ."
+  exec "nim c -r --mm:orc --threads:on -d:release src/tai.nim ."

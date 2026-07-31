@@ -10,8 +10,8 @@ Tai must present files, editor content, outlines, and an AI/command surface simu
 ## Decision
 
 Use TATUÍ constraint layout with five regions: top (tabs), left, center, right, bottom.
-File tree side is configurable; the opposite side shows outlines (`:hide outlines` collapses that pane).
+File tree side is configurable; the opposite side shows outlines. Toggle panels with `:hide`/`:show` and items `outlines` or `files` (`arquivos` accepted as alias).
 
 ## Consequences
 
-Immediate-mode redraw each tick; panel sizes from `config.toml`.
+Immediate-mode redraw each tick; panel sizes from `config.toml`. Drawing lives in `app.nim` (no separate panel modules).

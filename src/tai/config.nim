@@ -8,14 +8,9 @@ type
     ftsLeft
     ftsRight
 
-  KeymapStyle* = enum
-    kmHelix
-    kmVim
-
   AiProviderKind* = enum
     apkOpenAiCompat
     apkAnthropic
-    apkGoogle
     apkOllama
 
   AiConfig* = object
@@ -27,9 +22,8 @@ type
 
   Config* = object
     fileTreeSide*: FileTreeSide
-    keymap*: KeymapStyle
-    theme*: string
     outlinesVisible*: bool
+    filesVisible*: bool
     previewMode*: bool
     sidePanelWidth*: int
     bottomPanelHeight*: int
@@ -39,9 +33,8 @@ type
 proc defaultConfig*(): Config =
   Config(
     fileTreeSide: ftsLeft,
-    keymap: kmHelix,
-    theme: "default",
     outlinesVisible: true,
+    filesVisible: true,
     previewMode: false,
     sidePanelWidth: 28,
     bottomPanelHeight: 8,
@@ -63,16 +56,10 @@ proc parseSide(s: string): FileTreeSide =
   of "right": ftsRight
   else: ftsLeft
 
-proc parseKeymap(s: string): KeymapStyle =
-  case s.toLowerAscii
-  of "vim": kmVim
-  else: kmHelix
-
 proc parseProvider(s: string): AiProviderKind =
   case s.toLowerAscii
   of "anthropic": apkAnthropic
-  of "google": apkGoogle
-  of "ollama": apkOllama
+  of "ollama", "local": apkOllama
   else: apkOpenAiCompat
 
 proc loadConfig*(path = configPath()): Config =
@@ -82,12 +69,10 @@ proc loadConfig*(path = configPath()): Config =
   let t = parsetoml.parseFile(path)
   if t.hasKey("file_tree_side"):
     result.fileTreeSide = parseSide(t["file_tree_side"].getStr)
-  if t.hasKey("keymap"):
-    result.keymap = parseKeymap(t["keymap"].getStr)
-  if t.hasKey("theme"):
-    result.theme = t["theme"].getStr
   if t.hasKey("outlines_visible"):
     result.outlinesVisible = t["outlines_visible"].getBool
+  if t.hasKey("files_visible"):
+    result.filesVisible = t["files_visible"].getBool
   if t.hasKey("preview_mode"):
     result.previewMode = t["preview_mode"].getBool
   if t.hasKey("side_panel_width"):
@@ -115,21 +100,16 @@ proc saveConfig*(cfg: Config, path = configPath()) =
     case cfg.fileTreeSide
     of ftsLeft: "left"
     of ftsRight: "right"
-  let keymap =
-    case cfg.keymap
-    of kmHelix: "helix"
-    of kmVim: "vim"
   let provider =
     case cfg.ai.provider
     of apkOpenAiCompat: "openai"
     of apkAnthropic: "anthropic"
-    of apkGoogle: "google"
     of apkOllama: "ollama"
+  # Prefer env for secrets when rewriting; keep empty api_key in file if set via env only.
   let body = """
 file_tree_side = "$#"
-keymap = "$#"
-theme = "$#"
 outlines_visible = $#
+files_visible = $#
 preview_mode = $#
 side_panel_width = $#
 bottom_panel_height = $#
@@ -142,7 +122,7 @@ base_url = "$#"
 model = "$#"
 auth_token = "$#"
 """ % [
-    side, keymap, cfg.theme, $cfg.outlinesVisible, $cfg.previewMode,
+    side, $cfg.outlinesVisible, $cfg.filesVisible, $cfg.previewMode,
     $cfg.sidePanelWidth, $cfg.bottomPanelHeight, cfg.workspace,
     provider, cfg.ai.apiKey, cfg.ai.baseUrl, cfg.ai.model, cfg.ai.authToken,
   ]

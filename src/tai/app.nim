@@ -48,7 +48,6 @@ type
     ai*: AiSession
     lastFrameMs*: float
     panelRects*: PanelRects
-    treeExpanded*: bool
 
 proc setStatus*(app: var App, msg: string, secs = 3.0) =
   app.statusMsg = msg
@@ -78,15 +77,26 @@ proc openPath*(app: var App, path: string) =
     app.tabs.openDoc(doc)
     app.setStatus(loaded.error)
 
+proc bufferContext(app: App): string =
+  let doc = app.tabs.current
+  if doc.selection.active:
+    let sel = doc.selectedText()
+    if sel.len > 0:
+      let clipped = if sel.len > 6000: sel[0 ..< 6000] else: sel
+      return "Selection from " & doc.displayName() & ":\n" & clipped
+  let buf = doc.text()
+  let clipped = if buf.len > 4000: buf[0 ..< 4000] else: buf
+  if clipped.len == 0: return ""
+  "File " & doc.displayName() & ":\n" & clipped
+
 proc initApp*(cfg: Config): App =
   result.cfg = cfg
   result.tabs = initTabManager()
   result.cwd = if dirExists(cfg.workspace): cfg.workspace else: getCurrentDir()
   result.menu = initContextMenu()
   result.watcher = initFileWatcher()
-  result.ai = initAiSession(cfg.ai, getConfigDir() / "tai" / "cache")
+  result.ai = initAiSession(cfg.ai, getConfigDir() / "tai" / "cache", result.cwd)
   result.focus = fpEditor
-  result.treeExpanded = true
   result.refreshFileTree()
   result.refreshOutlines()
   result.setStatus("Tai ready — :help")
@@ -94,51 +104,58 @@ proc initApp*(cfg: Config): App =
 proc computeLayout*(app: var App, area: Rect): PanelRects =
   let topH = 1
   let bottomH = max(3, app.cfg.bottomPanelHeight)
-  let sideW =
-    if app.cfg.outlinesVisible: max(12, app.cfg.sidePanelWidth)
-    else: max(12, app.cfg.sidePanelWidth)
+  let sideW = max(12, app.cfg.sidePanelWidth)
+  let showFiles = app.cfg.filesVisible
+  let showOutlines = app.cfg.outlinesVisible
   let rows = area.split(Vertical, @[length(topH), fill(1), length(bottomH)])
   result.top = rows[0]
   result.bottom = rows[2]
   let mid = rows[1]
-  if app.cfg.outlinesVisible:
-    let cols =
-      if app.cfg.fileTreeSide == ftsLeft:
-        mid.split(Horizontal, @[length(sideW), fill(1), length(sideW)])
-      else:
-        mid.split(Horizontal, @[length(sideW), fill(1), length(sideW)])
+
+  if showFiles and showOutlines:
+    let cols = mid.split(Horizontal, @[length(sideW), fill(1), length(sideW)])
+    result.left = cols[0]
+    result.center = cols[1]
+    result.right = cols[2]
+  elif showFiles:
     if app.cfg.fileTreeSide == ftsLeft:
-      result.left = cols[0]
-      result.center = cols[1]
-      result.right = cols[2]
-    else:
-      # tree on right, outlines on left
-      result.left = cols[0]
-      result.center = cols[1]
-      result.right = cols[2]
-  else:
-    let cols =
-      if app.cfg.fileTreeSide == ftsLeft:
-        mid.split(Horizontal, @[length(sideW), fill(1)])
-      else:
-        mid.split(Horizontal, @[fill(1), length(sideW)])
-    if app.cfg.fileTreeSide == ftsLeft:
+      let cols = mid.split(Horizontal, @[length(sideW), fill(1)])
       result.left = cols[0]
       result.center = cols[1]
       result.right = rect(0, 0, 0, 0)
     else:
+      let cols = mid.split(Horizontal, @[fill(1), length(sideW)])
       result.left = rect(0, 0, 0, 0)
       result.center = cols[0]
       result.right = cols[1]
+  elif showOutlines:
+    # Outlines occupy the side opposite to the preferred file-tree side.
+    if app.cfg.fileTreeSide == ftsLeft:
+      let cols = mid.split(Horizontal, @[fill(1), length(sideW)])
+      result.left = rect(0, 0, 0, 0)
+      result.center = cols[0]
+      result.right = cols[1]
+    else:
+      let cols = mid.split(Horizontal, @[length(sideW), fill(1)])
+      result.left = cols[0]
+      result.center = cols[1]
+      result.right = rect(0, 0, 0, 0)
+  else:
+    result.left = rect(0, 0, 0, 0)
+    result.center = mid
+    result.right = rect(0, 0, 0, 0)
   app.panelRects = result
 
 proc fileTreeArea(app: App): Rect =
+  if not app.cfg.filesVisible:
+    return rect(0, 0, 0, 0)
   if app.cfg.fileTreeSide == ftsLeft: app.panelRects.left
   else: app.panelRects.right
 
 proc outlinesArea(app: App): Rect =
-  if not app.cfg.outlinesVisible: rect(0, 0, 0, 0)
-  elif app.cfg.fileTreeSide == ftsLeft: app.panelRects.right
+  if not app.cfg.outlinesVisible:
+    return rect(0, 0, 0, 0)
+  if app.cfg.fileTreeSide == ftsLeft: app.panelRects.right
   else: app.panelRects.left
 
 proc drawContextMenu(app: var App, f: var Frame) =
@@ -282,31 +299,38 @@ proc draw*(app: var App, f: var Frame) =
   app.drawEditor(f, layout.center)
 
   # Bottom: AI + command
+  let agentTag = if app.ai.allowDangerous: "agent" else: "ask"
+  let busyTag = if app.ai.busy: " …" else: ""
   let bottomBlk = initBlock(
-    title = " AI / :cmd  [" & formatGain(app.ai.stats) & "] ",
+    title = " AI/" & agentTag & busyTag & "  [" & formatGain(app.ai.stats) &
+      " | " & $app.lastFrameMs.int & "ms] ",
     borders = AllBorders,
   )
   f.renderWidget(bottomBlk, layout.bottom)
   let bInner = bottomBlk.inner(layout.bottom)
   if not bInner.isEmpty:
-    let msg =
-      if app.ai.messages.len > 0: app.ai.messages[^1]
-      else: ""
-    let clipped =
-      if msg.len > bInner.width.int: msg[0 ..< bInner.width.int]
-      else: msg
-    discard f.buf[].setStringN(bInner.left, bInner.top, clipped, defaultStyle(), bInner.width.int)
+    let promptRow = 1
+    let msgRows = max(1, bInner.height.int - promptRow)
+    let lines = visibleTranscript(app.ai, msgRows)
+    for i, line in lines:
+      let clipped =
+        if line.len > bInner.width.int: line[0 ..< bInner.width.int]
+        else: line
+      discard f.buf[].setStringN(
+        bInner.left, bInner.top + i, clipped, defaultStyle(), bInner.width.int
+      )
     let prompt =
       if app.commandMode: ":" & app.commandLine & "█"
       elif app.focus == fpAi: "ai> " & app.ai.input & "█"
       else:
         let st =
           if epochTime() < app.statusUntil: app.statusMsg
-          else: "Ctrl-Q quit │ : commands │ Tab focus │ mouse supported"
+          else: "Ctrl-Q quit │ :help │ Tab focus │ PgUp/Dn AI scroll"
         st
-    if bInner.height.int > 1:
+    if bInner.height.int > 0:
+      let py = bInner.top + bInner.height.int - 1
       discard f.buf[].setStringN(
-        bInner.left, bInner.top + 1, prompt, style(fg = some(Yellow)), bInner.width.int
+        bInner.left, py, prompt, style(fg = some(Yellow)), bInner.width.int
       )
 
   app.drawContextMenu(f)
@@ -331,27 +355,56 @@ proc handleAiCommand(app: var App, cmd: string) =
       app.setStatus("logged in (api key)")
     else:
       discard app.ai.startWebLogin()
-      app.setStatus("web auth started — :login <token>")
+      app.setStatus("paste token: :login <token>")
   of "provider":
     if parts.len >= 2:
       app.ai.setProvider(parts[1])
       app.cfg.ai = app.ai.cfg
       saveConfig(app.cfg)
+    else:
+      app.setStatus("usage: :provider openai|anthropic|ollama")
+  of "model":
+    let m = if parts.len >= 2: parts[1 .. ^1].join(" ") else: ""
+    app.ai.setModel(m)
+    if m.len > 0:
+      app.cfg.ai = app.ai.cfg
+      saveConfig(app.cfg)
+  of "agent":
+    if parts.len >= 2 and parts[1].toLowerAscii in ["on", "1", "true"]:
+      app.ai.allowDangerous = true
+      app.setStatus("agent mode: write/shell enabled")
+    else:
+      app.ai.allowDangerous = false
+      app.setStatus("ask mode: read-only tools")
+  of "clear":
+    app.ai.clearChat()
+    app.setStatus("chat cleared")
   of "rag":
     if parts.len >= 2 and parts[1] == "reindex":
       app.ai.rag = reindex(app.cwd)
       app.setStatus("RAG indexed " & $app.ai.rag.chunks.len & " chunks")
     else:
       app.setStatus("usage: :rag reindex")
+  of "shell":
+    if parts.len < 2:
+      app.setStatus("usage: :shell <command>")
+      return
+    if not app.ai.allowDangerous:
+      app.setStatus("shell blocked — :agent on first")
+      return
+    let cmdLine = parts[1 .. ^1].join(" ")
+    let r = runWithRtk(cmdLine)
+    app.ai.stats.rtkSavedTokens += r.savedTokens
+    app.ai.pushMsg "shell" & (if r.usedRtk: " (rtk)" else: "") & ": " & cmdLine
+    for line in r.output.splitLines():
+      app.ai.pushMsg "  " & line
   of "ai":
     let prompt = if parts.len > 1: parts[1 .. ^1].join(" ") else: ""
     if prompt.len == 0:
       app.focus = fpAi
       app.setStatus("AI focus — type message, Enter to send")
     else:
-      let bufCtx = app.tabs.current.text()
-      let clipped = if bufCtx.len > 4000: bufCtx[0 ..< 4000] else: bufCtx
-      discard app.ai.ask(prompt, clipped)
+      app.ai.startAskAsync(prompt, app.bufferContext())
   else:
     discard
 
@@ -360,8 +413,17 @@ proc runCommand(app: var App, line: string) =
   var ctx = CommandContext(cfg: addr app.cfg, doc: addr doc, status: "")
   let r = dispatchCommand(ctx, line)
   app.tabs.docs[app.tabs.active] = doc
-  if r.message.startsWith("AI_CMD:"):
-    app.handleAiCommand(r.message["AI_CMD:".len .. ^1])
+  if r.aiCmd.len > 0:
+    app.handleAiCommand(r.aiCmd)
+  elif r.openPath.len > 0:
+    app.openPath(r.openPath)
+  elif r.newCwd.len > 0:
+    app.cwd = r.newCwd
+    app.ai.workspace = r.newCwd
+    app.ai.refreshProjectMemory(r.newCwd)
+    app.refreshFileTree()
+    app.setStatus(r.message)
+    saveConfig(app.cfg)
   elif r.ok:
     if r.message.len > 0:
       app.setStatus(r.message)
@@ -462,6 +524,12 @@ proc handleEditorKey(app: var App, key: KeyEvent) =
         discard app.tabs.closeActive()
       of "q":
         app.quit = true
+      of "n":
+        app.tabs.nextTab()
+        app.refreshOutlines()
+      of "p":
+        app.tabs.prevTab()
+        app.refreshOutlines()
       else:
         discard
     elif kmAlt in key.mods:
@@ -532,6 +600,7 @@ proc handleMouse(app: var App, m: MouseEvent) =
     let idx = app.fileState.offset + innerY
     if idx == 0:
       app.cwd = parentDir(app.cwd)
+      app.ai.workspace = app.cwd
       app.refreshFileTree()
       return
     let fileIdx = idx - 1
@@ -540,6 +609,7 @@ proc handleMouse(app: var App, m: MouseEvent) =
       let e = app.fileEntries[fileIdx]
       if e.isDir:
         app.cwd = e.path
+        app.ai.workspace = app.cwd
         app.refreshFileTree()
       else:
         app.openPath(e.path)
@@ -584,12 +654,69 @@ proc handleMouse(app: var App, m: MouseEvent) =
       elif m.kind == mkScrollDown:
         app.scrollY += 3
 
+proc activateFileTreeSelection(app: var App) =
+  let idx = app.fileState.selected.get(0)
+  if idx == 0:
+    app.cwd = parentDir(app.cwd)
+    app.ai.workspace = app.cwd
+    app.refreshFileTree()
+    return
+  let fileIdx = idx - 1
+  if fileIdx >= 0 and fileIdx < app.fileEntries.len:
+    let e = app.fileEntries[fileIdx]
+    if e.isDir:
+      app.cwd = e.path
+      app.ai.workspace = app.cwd
+      app.refreshFileTree()
+    else:
+      app.openPath(e.path)
+
+proc handleSideKey(app: var App, key: KeyEvent) =
+  case app.focus
+  of fpFileTree:
+    let maxIdx = app.fileEntries.len # includes ".." at 0
+    case key.code
+    of kcUp:
+      let cur = app.fileState.selected.get(0)
+      app.fileState.select(max(0, cur - 1))
+    of kcDown:
+      let cur = app.fileState.selected.get(0)
+      app.fileState.select(min(maxIdx, cur + 1))
+    of kcEnter:
+      app.activateFileTreeSelection()
+    else:
+      discard
+  of fpOutlines:
+    if app.outlineItems.len == 0: return
+    case key.code
+    of kcUp:
+      let cur = app.outlineState.selected.get(0)
+      app.outlineState.select(max(0, cur - 1))
+    of kcDown:
+      let cur = app.outlineState.selected.get(0)
+      app.outlineState.select(min(app.outlineItems.high, cur + 1))
+    of kcEnter:
+      let idx = app.outlineState.selected.get(0)
+      if idx >= 0 and idx < app.outlineItems.len:
+        var doc = app.tabs.current
+        doc.setCursor(Cursor(row: app.outlineItems[idx].line, col: 0))
+        app.tabs.docs[app.tabs.active] = doc
+        app.scrollY = max(0, app.outlineItems[idx].line - 2)
+        app.focus = fpEditor
+    else:
+      discard
+  else:
+    discard
+
 proc handleEvent*(app: var App, ev: Event) =
   case ev.kind
   of evKey:
     let key = ev.key
     if key.code == kcChar and kmCtrl in key.mods and key.rune.toUTF8.toLowerAscii == "q":
       app.quit = true
+      return
+    if app.ai.busy and key.code == kcEsc:
+      app.ai.requestCancel()
       return
     if app.menu.visible:
       case key.code
@@ -626,17 +753,22 @@ proc handleEvent*(app: var App, ev: Event) =
     if app.focus == fpAi and not app.commandMode:
       case key.code
       of kcEsc:
-        app.focus = fpEditor
+        if app.ai.busy:
+          app.ai.requestCancel()
+        else:
+          app.focus = fpEditor
       of kcEnter:
         let prompt = app.ai.input
         app.ai.input = ""
         if prompt.len > 0:
-          let bufCtx = app.tabs.current.text()
-          let clipped = if bufCtx.len > 4000: bufCtx[0 ..< 4000] else: bufCtx
-          discard app.ai.ask(prompt, clipped)
+          app.ai.startAskAsync(prompt, app.bufferContext())
       of kcBackspace:
         if app.ai.input.len > 0:
           app.ai.input.setLen(app.ai.input.len - 1)
+      of kcPageUp:
+        app.ai.scroll = min(app.ai.messages.len, app.ai.scroll + 3)
+      of kcPageDown:
+        app.ai.scroll = max(0, app.ai.scroll - 3)
       of kcChar:
         if kmCtrl notin key.mods:
           app.ai.input.add key.rune.toUTF8
@@ -646,8 +778,6 @@ proc handleEvent*(app: var App, ev: Event) =
     # Start command mode
     if key.code == kcChar and key.rune.toUTF8 == ":" and kmCtrl notin key.mods and
         app.focus == fpEditor:
-      # Helix/Vim: colon starts command — in insert-friendly mode only when alone at idle;
-      # for Tai we use ':' always to enter command mode (Helix-like).
       app.commandMode = true
       app.commandLine = ""
       return
@@ -657,6 +787,9 @@ proc handleEvent*(app: var App, ev: Event) =
       of fpFileTree: app.focus = fpOutlines
       of fpOutlines: app.focus = fpAi
       of fpAi, fpCommand: app.focus = fpEditor
+      return
+    if app.focus in {fpFileTree, fpOutlines}:
+      app.handleSideKey(key)
       return
     if app.focus == fpEditor:
       app.handleEditorKey(key)
@@ -691,6 +824,7 @@ proc runApp*(app: var App) =
     term.restore()
     app = state[]
   while not state.quit:
+    discard state[].ai.pollAiEvents()
     for path in state.watcher.poll():
       if state.tabs.current.path == path and not state.tabs.current.dirty:
         let loaded = loadFile(path)

@@ -16,7 +16,7 @@ Tai is a terminal text editor written in **Nim**, built on **[TATUÍ](https://gi
 - **Top:** navigable editor tabs
 - **Left/Right:** file tree (user preference) and outlines (opposite side)
 - **Center:** editing surface with mouse, context menu, syntax highlight, preview
-- **Bottom:** AI harness + `:` command line (Helix-first, Vim optional)
+- **Bottom:** AI harness + `:` command line (Helix-style)
 
 ## Modules
 
@@ -26,16 +26,20 @@ Tai is a terminal text editor written in **Nim**, built on **[TATUÍ](https://gi
 | `src/tai/config.nim` | `~/.config/tai/config.toml` |
 | `src/tai/buffer/` | Documents + tabs |
 | `src/tai/commands/` | Colon commands |
-| `src/tai/fs/` | I/O, clipboard, watcher |
+| `src/tai/fs/` | I/O, clipboard, mtime watcher |
 | `src/tai/highlight/` | Syntax highlighting |
 | `src/tai/preview/` | MD/HTML preview |
 | `src/tai/outline/` | Symbol outlines |
-| `src/tai/ai/` | Providers, caches, RAG, RTK |
+| `src/tai/ai/` | Providers, caches, RAG, tools, RTK |
 
-## Epics
+## AI harness (current)
 
-1. Infrastructure & architecture
-2. Layout, behaviours, commands
-3. OS integration & streaming viewport
-4. Highlights & content rendering
-5. AI harness (caches, RAG, RTK)
+- Providers: OpenAI-compatible, Anthropic, Ollama
+- Background HTTP via threads; Esc cancels between tool rounds
+- Tools: `read_file`, `list_dir`, `grep`; `write_file` / `shell` require `:agent on`
+- Project memory: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`
+- Exact-match response cache (JSON), transcript session file, keyword RAG, optional RTK
+
+## Roadmap (backlog)
+
+- MCP client, plan mode, skills/hooks, git commands, tree-sitter highlight, OAuth device-code, theming, Vim modal keymap, true token streaming
